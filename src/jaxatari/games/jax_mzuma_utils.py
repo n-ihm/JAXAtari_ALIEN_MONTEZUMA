@@ -8,6 +8,7 @@ import json
 from enum import Enum
 from jax import Array as jArray
 import jax
+import  itertools
 from functools import partial
 import copy
 import itertools as it
@@ -28,6 +29,11 @@ class NamedTupleFieldType(Enum):
     NAMED_TUPLE_STACK = 2 # Named tuples with scalar integer values in all fields. These can be 
         # synchronised to the global state but they are required to be registered to the 
         # ScalarNamedTupleDeserialisationHandler beforehand.
+    ROOM_SIZED_ARRAY = 3 # A numpy/jax array whose second dimension (dim 1) corresponds to the room height
+        # rather than the full display height. During preprocessing (get_jitted_room_constructor),
+        # such fields are automatically padded along dim 1 to the full display height using the
+        # room's vertical_offset. After padding, coordinates into this field are display-absolute
+        # (i.e. use room_y + vertical_offset when indexing). Cannot be serialised to persistence.
     
 class RequiredRoomFields(Enum):
     ROOM_ID = "ROOM_ID"
@@ -120,7 +126,10 @@ class SANTAH():
     registered_room_nt: List[Type[NamedTuple]] = []
     room_tags: Dict[Type[NamedTuple], Tuple[Enum]] = {}
     write_back_tag_information_to_room: Dict[Type[RoomNamedTuple], Dict[TagEnum, Callable[[RoomNamedTuple, TagNamedTuple], RoomNamedTuple]]]= {}
-    
+    # Fields that share the room dimension and are present in the tags
+    roomsized_tag_fields: dict[type, frozenset[str]] = None
+    # Fields that share the room dimension and are present in all rooms
+    roomsized_room_fields: Enum = None
     
     # Constructor fields: 
     # The framework allows the developer to declare constructors/ functions to generate contents for specific fields at startup-time
@@ -130,14 +139,19 @@ class SANTAH():
     
     _vanilla_room_field_constructors: Dict[str, Callable[[NamedTuple], jArray]] = {}
     tag_based_room_constructor_fields: Dict[Enum, Dict[str, Callable[[VanillaRoom, TagNamedTuple], jArray]]] = {}
-    
-        
+
+    # Full display dimensions -- required to pad ROOM_SIZED_ARRAY fields during preprocessing.
+    display_height: int = None
+    display_width: int = None
+
     @classmethod
     def register_proto_room(cls, room_field_enum: Enum, proto_room_nt: NamedTuple, 
                             fields_that_are_shared_but_have_different_shape: Enum, 
                             vanilla_room_type: Type[NamedTuple],
                             vanilla_room_enum: Type[Enum],
-                            constructed_fields: Dict[str, Callable[[VanillaRoom], jArray]] = {}):
+                            constructed_fields: Dict[str, Callable[[VanillaRoom], jArray]] = {},
+                            display_width: int = None,
+                            display_height: int = None):
         """Registers the template for all rooms. 
             All rooms are required to have at least all the fields specified for the Proto Room. 
             
@@ -150,6 +164,8 @@ class SANTAH():
             fields_that_are_shared_but_have_different_shape (Enum):  Fields that are present in all rooms, 
                 but have DIFFERENT Shapes and/ or data types in some rooms. 
                 This is mostly only used for the collision/ render maps.
+            display_width (int, optional): Full display width in pixels. Required for ROOM_SIZED_ARRAY padding.
+            display_height (int, optional): Full display height in pixels. Required for ROOM_SIZED_ARRAY padding.
         
 
         """
@@ -165,6 +181,8 @@ class SANTAH():
         cls.shared_by_all_but_not_the_same = fields_that_are_shared_but_have_different_shape
         cls.vanilla_room = vanilla_room_type
         cls.vanilla_room_enum = vanilla_room_enum
+        cls.display_width = display_width
+        cls.display_height = display_height
         
         # Check if the field_enum matches the fields present in the Vanilla room, if not throw an error.
         nd_fields = set([f.value for f in cls.proto_room_field_enum])
@@ -553,7 +571,13 @@ class SANTAH():
                 
                 
         
-        
+    @classmethod
+    def specify_roomsized_fields(cls, roomsized_tag_fields: dict[Type, frozenset], 
+                             roomsized_room_fields: Enum) -> None:
+        cls.roomsized_tag_fields = roomsized_tag_fields
+        cls.roomsized_room_fields = roomsized_room_fields
+    
+    
     @classmethod
     def add_new_named_tuple(cls, tup: NamedTuple, field_enum: Type[Enum], partial_serialisation_fields: List[str] = []):
         """Generates functionality for serialization & deserialization of the named tuple.
@@ -871,6 +895,17 @@ class Room:
             self.field_contents[field_name] = content
             self.field_persistent[field_name] = False
             self.field_type[field_name] = NamedTupleFieldType.OTHER_ARRAY
+
+        elif field_type == NamedTupleFieldType.ROOM_SIZED_ARRAY:
+            if requires_serialisation:
+                raise Exception("Cannot serialise field of type 'ROOM_SIZED_ARRAY'")
+            if not isinstance(content, jArray):
+                raise Exception("ROOM_SIZED_ARRAY content must be a jax/numpy array")
+            if content.ndim < 2:
+                raise Exception("ROOM_SIZED_ARRAY fields must have at least 2 dimensions (dim 1 is the room-height dimension)")
+            self.field_contents[field_name] = content
+            self.field_persistent[field_name] = False
+            self.field_type[field_name] = NamedTupleFieldType.ROOM_SIZED_ARRAY
             
             
     def get_jitted_room_constructor(self)->Callable[[], NamedTuple]:
@@ -989,7 +1024,34 @@ class Room:
             cnt = SANTAH._fields_constructor[self.underlyingTupleClass][f](
                                 self.underlyingTupleClass(**copy.deepcopy(init_field_content_underlying_tuple_class)))
             content_dict[f] = cnt
-        
+
+        # All fields in the room which need to be padded to roomsize to guarantee spatial consistency
+        per_room_resize_fields: list[str]
+        my_tags: list[Enum] = SANTAH.room_tags[self.underlyingTupleClass]
+        per_room_resize_fields = list(itertools.chain.from_iterable([list(SANTAH.roomsized_tag_fields[e]) for e in my_tags if e in SANTAH.roomsized_tag_fields]))
+        per_room_resize_fields += [e.value for e in SANTAH.roomsized_room_fields]
+        if SANTAH.display_height is None or SANTAH.display_width is None:
+            raise Exception(
+                "ROOM_SIZED_ARRAY fields are present but display_height/display_width were not "
+                "registered. Pass display_height and display_width to SANTAH.register_proto_room.")
+        vertical_offset_val = int(content_dict[RequiredRoomFields.VERTICAL_OFFSET.value][0])
+        for f in content_dict.keys():
+            if f not in per_room_resize_fields:
+                continue
+            print(f)
+            field_arr = content_dict[f]
+            # Build the full-display-size shape: same as field_arr but dim 1 -> display_height
+            full_shape = list(field_arr.shape)
+            full_shape[1] = SANTAH.display_height
+            if full_shape == field_arr.shape:
+                continue
+            padded = jnp.zeros(full_shape, dtype=field_arr.dtype)
+            # start_indices: 0 for every dim except dim 1 which is vertical_offset
+            start_indices = [0] * len(field_arr.shape)
+            start_indices[1] = vertical_offset_val
+            padded = jax.lax.dynamic_update_slice(padded, field_arr, start_indices=tuple(start_indices))
+            content_dict[f] = padded
+
         def jittable_initialisation(content: Dict[str, Any], tuple_class: NamedTuple):
             return tuple_class(**content)
         return jax.jit(partial(jittable_initialisation, content=content_dict, tuple_class=self.underlyingTupleClass))
@@ -1018,7 +1080,7 @@ class Room:
         named_tuple_sizes: List[int] = []
         named_tuple_stack_heights: List[int] = []
         for f in self.present_fields:
-            if self.field_type[f] == NamedTupleFieldType.OTHER_ARRAY:
+            if self.field_type[f] in (NamedTupleFieldType.OTHER_ARRAY, NamedTupleFieldType.ROOM_SIZED_ARRAY):
                 continue
             elif self.field_type[f] == NamedTupleFieldType.INTEGER_SCALAR:
                 if not self.field_persistent[f]:

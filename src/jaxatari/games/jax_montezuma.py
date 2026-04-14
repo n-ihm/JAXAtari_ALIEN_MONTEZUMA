@@ -914,7 +914,7 @@ class JaxMontezuma(JaxEnvironment[MontezumaState, MontezumaObservation, Montezum
         casted_collision_map: jArray = jax.lax.dynamic_update_slice(casted_collision_map, update=jnp.astype(aliased_colision_map, jnp.int32), 
                                                                     start_indices=(0, room.vertical_offset[0]))
         
-        return casted_collision_map
+        return casted_collision_map[:, :-1] # Because it's one larger...
     
     
     def _make_dropout_floor_render_maps(self, room: VanillaRoom, dropout_tag: RoomTags.DROPOUTFLOORS.value) -> jArray:
@@ -1159,12 +1159,16 @@ class JaxMontezuma(JaxEnvironment[MontezumaState, MontezumaObservation, Montezum
                     vanilla_room_enum=VanillaRoomFields, 
                     constructed_fields={
                         VanillaRoomFields.sprite.value: lambda x: None
-                    })
+                    },
+                    display_width=self.consts.WIDTH,
+                    display_height=self.consts.HEIGHT)
         else:
             SANTAH.register_proto_room(room_field_enum=ConstantShapeRoomFields, proto_room_nt=Room, 
                     fields_that_are_shared_but_have_different_shape=FieldsThatAreSharedByAllRoomsButHaveDifferentShape, 
                     vanilla_room_type=VanillaRoom, 
-                    vanilla_room_enum=VanillaRoomFields)
+                    vanilla_room_enum=VanillaRoomFields,
+                    display_width=self.consts.WIDTH,
+                    display_height=self.consts.HEIGHT)
         #
         # Default values are registered per-room tag, so that no further work is necessary
         # when adding more features to a room. 
@@ -1476,6 +1480,12 @@ class JaxMontezuma(JaxEnvironment[MontezumaState, MontezumaObservation, Montezum
         # This is necessary, as rooms have varying shapes & sizes.
         
         # Use 1 as default value, so the player can't get outside the room-area
+        room_specific_collision_map: jnp.ndarray = getattr(room_state, FieldsThatAreSharedByAllRoomsButHaveDifferentShape.room_collision_map.value)
+        room_specific_collision_map = jnp.astype(room_specific_collision_map, jnp.uint8)
+        
+        montezuma_state = SANTAH.attribute_setters[MontezumaState][MontezumaStateFields.augmented_collision_map.value](montezuma_state, room_specific_collision_map)
+        return montezuma_state, room_state
+        # TODO MAYBE HOPEFULLY NOT NECESSARY ANYMORE??????
         canvas: jnp.ndarray = jnp.ones(shape=(self.consts.WIDTH, self.consts.HEIGHT), dtype=jnp.uint8)
          
         room_specific_collision_map: jnp.ndarray = getattr(room_state, FieldsThatAreSharedByAllRoomsButHaveDifferentShape.room_collision_map.value)
@@ -1536,6 +1546,7 @@ class JaxMontezuma(JaxEnvironment[MontezumaState, MontezumaObservation, Montezum
             bonus_room_attrs: RoomTags.BONUSROOM.value = SANTAH.extract_tag_from_rooms[RoomTags.BONUSROOM](room_state)
             state = montezuma_state
             old_collision_map = state.augmented_collision_map
+            # THIS IS FINE, already the correct size!!!!
             new_collision_map = jnp.logical_or(bonus_room_attrs.bonus_room_floor_collison_map,old_collision_map).astype(jnp.uint8)
             floor_drop_cond= jnp.logical_and(jnp.greater(state.frame_count[0],state.first_item_pickup_frame[0]+bonus_room_attrs.bonus_cycle_lenght[0]),state.first_item_pickup_frame[0])
             new_collision_map = jax.lax.cond(floor_drop_cond,
@@ -1554,6 +1565,7 @@ class JaxMontezuma(JaxEnvironment[MontezumaState, MontezumaObservation, Montezum
         if RoomTags.CONVEYORBELTS in tags:
             conveyor_belts_attrs: RoomTags.CONVEYORBELTS.value = SANTAH.extract_tag_from_rooms[RoomTags.CONVEYORBELTS](room_state)
             state = montezuma_state
+            # Also already old size...
             old_collision_map = state.augmented_collision_map
             new_collision_map = jnp.logical_or(conveyor_belts_attrs.global_conveyor_collision_map,old_collision_map).astype(jnp.uint8)
             state = SANTAH.attribute_setters[MontezumaState][MontezumaStateFields.augmented_collision_map.value](state, new_collision_map)
@@ -2970,6 +2982,7 @@ class JaxMontezuma(JaxEnvironment[MontezumaState, MontezumaObservation, Montezum
         
         return non_default_value, new_pos
     
+    # TODO: until here
     
     def _may_collide_with_environment(self, state: MontezumaState, new_player_position: jArray, old_player_position: jArray):
         """Checks if the player may collide with the environment
@@ -3604,6 +3617,7 @@ class JaxMontezuma(JaxEnvironment[MontezumaState, MontezumaObservation, Montezum
         Returns:
             MontezumaState: Updated state with falling attributes set
         """
+        jax.debug.print("PLAYER pos = {x}", x=state.player_position)
         augmented_collision_map: jnp.ndarray = state.augmented_collision_map
         # Check how much space there is below the player
         down_distance: int = self.ray_cast_downwards(state.player_position, augmented_collision_map, state.room_state.vertical_offset)
@@ -3891,7 +3905,9 @@ class JaxMontezuma(JaxEnvironment[MontezumaState, MontezumaObservation, Montezum
                                                                                    old_player_position=old_player_position)
         
         # Find the nearest free position that is occupiable by the player
+        jax.debug.print("FUCK AAAAAAAAAA {x}", x=state.player_position)
         new_position = self.find_nearest_free_position_2D_conv(state, vertical_collision_check_hitmap)
+        jax.debug.print("FUCK BBBBB {x}", x=new_position)
         
         
         final_new_position = (1 - may_be_pushed_into_free_space[0])*state.player_position + may_be_pushed_into_free_space[0]*new_position
@@ -4646,7 +4662,9 @@ class MontezumaRenderer(JAXGameRenderer):
         # renders the variable-size room sprite onto the canvas.
         #
         room_sprite: jnp.ndarray = getattr(room_state, FieldsThatAreSharedByAllRoomsButHaveDifferentShape.sprite.value)
+        #breakpoint()
         vert_offset: jnp.ndarray = room_state.vertical_offset
+        
         canvas = montezuma_state.canvas
         canvas = jax.lax.dynamic_update_slice(operand=canvas, 
                                      update=room_sprite, 
@@ -4753,7 +4771,7 @@ class MontezumaRenderer(JAXGameRenderer):
         if RoomTags.SIDEWALLS in tags:
             side_walls: RoomTags.SIDEWALLS.value = SANTAH.extract_tag_from_rooms[RoomTags.SIDEWALLS](room_state)
             canvas = montezuma_state.canvas
-            canvas = jr.render_at(canvas,room_state.vertical_offset[0],0,side_walls.side_walls_render_map)
+            canvas = jr.render_at(canvas,0,0,side_walls.side_walls_render_map)
             return canvas
         else:
             return montezuma_state.canvas
@@ -4792,7 +4810,7 @@ class MontezumaRenderer(JAXGameRenderer):
             canvas = montezuma_state.canvas 
             animation_index = (jnp.mod(montezuma_state.frame_count,self.consts.ANIMATION_CYCLE_DURATION*pit.pit_render_maps.shape[0])/self.consts.ANIMATION_CYCLE_DURATION).astype(jnp.int32)
             
-            canvas = jr.render_at(canvas,room_state.vertical_offset, 0, pit.pit_render_maps[animation_index[0]])
+            canvas = jr.render_at(canvas,0, 0, pit.pit_render_maps[animation_index[0]])
             return canvas
         else:
             return montezuma_state.canvas

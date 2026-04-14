@@ -1,4 +1,4 @@
-from typing import NamedTuple
+from typing import NamedTuple, Dict, Type
 from enum import Enum
 import jax.numpy as jnp
 from jax import Array as jArray
@@ -838,6 +838,69 @@ class EnemyFields(Enum):
 #
 #
 #
+# ROOM-SIZED FIELD ANNOTATIONS
+#
+# Fields tagged as NamedTupleFieldType.ROOM_SIZED_ARRAY have shape (W, room_height, ...)
+# rather than (W, display_height, ...).  SANTAH automatically pads them along dim 1
+# to the full display height (using the room's vertical_offset) during preprocessing.
+# After padding, all coordinates into such fields must use display-absolute y values,
+# i.e. caller must add vertical_offset when converting from room-relative y coords.
+#
+# The dict below lists, per Tag companion-enum, which fields are candidates for the
+# ROOM_SIZED_ARRAY type.  When a Room.set_field call uses
+#   field_type=NamedTupleFieldType.ROOM_SIZED_ARRAY
+# for one of these fields the padding will be applied automatically.
+#
+# Fields whose room-height axis is NOT dim 1 (e.g. (N, W, H, C) tensors) require
+# manual padding and are annotated with a comment below.
+#
+ROOM_SIZED_TAG_FIELDS: Dict[Type, frozenset] = {
+    MandatoryRopeFieldsEnum: frozenset([
+        MandatoryRopeFieldsEnum.rope_render_map.value,       # shape (W, H, 4)
+        MandatoryRopeFieldsEnum.rope_colision_map.value,     # shape (W, H)
+        MandatoryRopeFieldsEnum.room_surfaces.value,         # shape (W, H)
+        MandatoryRopeFieldsEnum.room_rope_top_pixels.value,  # shape (W, H)
+    ]),
+    RoomTags.LADDERS: frozenset([
+        MandatoryLadderFieldsEnum.ladders_sprite.value,              # shape (W, H, 4)
+        MandatoryLadderFieldsEnum.ladder_tops.value,                 # shape (W, H)
+        MandatoryLadderFieldsEnum.ladder_bottoms.value,              # shape (W, H)
+        MandatoryLadderFieldsEnum.ladder_room_surface_pixels.value,  # shape (W, H)
+    ]),
+    MandatoryLazerBarrierFieldsEnum: frozenset([
+        MandatoryLazerBarrierFieldsEnum.global_barrier_map.value,    # shape (W, H)
+    ]),
+    MandatoryDoorFieldsEnum: frozenset([
+        MandatoryDoorFieldsEnum.global_collision_map.value,          # shape (W, H)
+    ]),
+    MandatoryDropoutFloorFieldsEnum: frozenset([
+        MandatoryDropoutFloorFieldsEnum.dropout_floor_colision_map.value,  # shape (W, H)
+        # NOTE: dropout_floor_render_maps has shape (2, W, H, 4) -- room-height is dim 2,
+        # not dim 1.  Use explicit manual padding for that field; the standard
+        # ROOM_SIZED_ARRAY mechanism only pads dim 1.
+    ]),
+    MandatorySidewallsFieldsEnum: frozenset([
+        MandatorySidewallsFieldsEnum.side_walls_render_map.value,    # shape (W, H, 4)
+        MandatorySidewallsFieldsEnum.side_walls_collision_map.value, # shape (W, H)
+    ]),
+    MandatoryConveyorBeltFieldsEnum: frozenset([
+        MandatoryConveyorBeltFieldsEnum.global_conveyor_collision_map.value,           # shape (W, H)
+        MandatoryConveyorBeltFieldsEnum.global_conveyor_movement_collision_map.value,  # shape (W, H)
+        # NOTE: global_conveyor_render_map has shape (2, W, H, 4) -- room-height is dim 2.
+        # Use manual padding; ROOM_SIZED_ARRAY pads dim 1 only.
+    ]),
+    MandatoryBonusRoomFieldsEnum: frozenset([
+        MandatoryBonusRoomFieldsEnum.bonus_room_floor_collison_map.value,  # shape (W, H)
+    ]),
+    # MandatoryPitFieldsEnum.pit_render_maps has shape (4, W, room_height, 4) --
+    # room-height is dim 2 -- and is already stored at room size.
+    # Use manual padding for this field; ROOM_SIZED_ARRAY pads dim 1 only.
+}
+
+
+#
+#
+#
 # Register all the enums I have made!!!
 #
 #
@@ -885,3 +948,7 @@ SANTAH.add_new_named_tuple(Enemy, field_enum=EnemyFields,
                                                          EnemyFields.last_animation.value, 
                                                          EnemyFields.optional_utility_field.value])
 SANTAH.add_new_named_tuple(ConveyorBelt, field_enum=ConveyorBeltEnum)
+SANTAH.specify_roomsized_fields(
+    roomsized_tag_fields=ROOM_SIZED_TAG_FIELDS, 
+    roomsized_room_fields=FieldsThatAreSharedByAllRoomsButHaveDifferentShape
+)
