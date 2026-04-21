@@ -1,6 +1,6 @@
 from __future__ import annotations
 import jax.numpy as jnp
-from typing import NamedTuple, Dict, Callable, List, Type, Tuple, Any, NewType, TypeVar
+from typing import NamedTuple, Dict, Callable, List, Type, Tuple, Any, NewType, TypeVar, Annotated, get_type_hints, get_origin, get_args
 import inspect
 from jaxatari.games.jax_montezuma_constants import *
 from collections import namedtuple
@@ -13,8 +13,40 @@ from functools import partial
 import copy
 import itertools as it
 import warnings
+#--------------------- These are used to annotate fields of tags (room or no room)
+# Fields are used to annotate both Room Tags and regular
+# Used to anotate fields of Roomtags and named tuplesthat are dynamic and need to be preserved in the state.
+# Only fields that store either integer scalars or named_tuple_stacks are allowed to be dynamic.
+DYNAMIC = object()
+STATIC = object()
+# Used to annotate fields of ONLY roomtags that have constant shape
+CONSTANT_SHAPE = object()
+# Used to mark fields that are to be padded to room size. Should be handled mutually exclusively to 
+# the CONSTANT_SHAPE tag. If both occur, ROOM_SHAPED takes precedence over constant shape.
+# Acts like CONSTANT_SHAPE but also attempts to padd fields to room size.
+ROOM_SHAPED = object()
+# both ROOM_SHAPED and CONSTANT_SHAPED may not EVER be combined with dynamic. Ideally I throw an error if this 
+# occurs.
 
+# Specifies that a DYNAMIC fields contains a stack of Named Tuples.
+NAMED_TUPLE_STACK = object()
+# Specifies that a DYNAMIC field contains a singleton integer.
+SINGLETON_INT = object()
 
+#          VALID HIERARCHIES
+#
+#   
+# DYNAMIC --->SINGLETON_INT
+#         --->NAMED_TUPLE_STACK ----> Named Tuple Class (Dynamic and Static singleton int fields)
+#                               ////////////////////// NO, just padd always----> CONSTANT_SHAPE (If all tags of this type have the same number of named tuples (TODO: should be removed in the future))
+#
+#
+# STATIC    ---> SINGLETON_INT
+#           ---> NAMED_TUPLE_STACK ---> Named Tuple Class (Only allowed to have static singleton int fields)
+#                                  /////////////////// NO, just padd anyways---> CONSTANT_SHAPE (If all tags of this type have the same number of named tuples (TODO: should be removed in the future))
+#           ---> ROOM_SHAPED
+#           ---> CONSTANT_SHAPE
+#
 
 class RoomConnectionDirections(Enum):
     LEFT = 0
@@ -123,6 +155,7 @@ class SANTAH():
     tagged_field_field_type: Dict[str, NamedTupleFieldType] = {}
     extract_tag_from_rooms: Dict[Enum, Callable[[RoomNamedTuple], TagNamedTuple]] = {}
     registered_named_tuple: List[Type[NamedTuple]] = []
+    registered_named_tuple_names: List[str] = []
     registered_room_nt: List[Type[NamedTuple]] = []
     room_tags: Dict[Type[NamedTuple], Tuple[Enum]] = {}
     write_back_tag_information_to_room: Dict[Type[RoomNamedTuple], Dict[TagEnum, Callable[[RoomNamedTuple, TagNamedTuple], RoomNamedTuple]]]= {}
@@ -577,6 +610,60 @@ class SANTAH():
         cls.roomsized_tag_fields = roomsized_tag_fields
         cls.roomsized_room_fields = roomsized_room_fields
     
+    @classmethod
+    def is_namedtuple_class(cls, nt_class) -> bool:
+        # Hacky, attempts to check whether a type is a NamedTuples.
+        # Can't do that via is_subtype as NamedTuples are not really types...
+        return (
+            isinstance(nt_class, type)
+            and issubclass(nt_class, tuple)
+            and hasattr(nt_class, "_fields")
+            and hasattr(nt_class, "_asdict")
+            and isinstance(getattr(nt_class, "_fields"), tuple)
+        )
+
+    @classmethod
+    def _check_named_tuple_annotations(cls, tup: NamedTuple) -> None:
+        hints = get_type_hints(tup, include_extras=True)
+        tup_name: str = tup.__name__
+        for field, f_hint in hints.items():
+            if get_origin(f_hint) is not Annotated:
+                raise Exception(f"Field {field} of NamedTuple {tup_name} is not annotated via Annotation[].")
+            base_type, custom_annos = get_args(f_hint)
+            custom_annos = tuple(custom_annos)
+            if STATIC not in custom_annos and DYNAMIC not in custom_annos:
+                raise Exception(f"NamedTuple {tup_name}, field {field}:: All fields are required to have either a STATIC or DYNAMIC annotation,")
+            if STATIC in custom_annos and DYNAMIC in custom_annos:
+                raise Exception(f"NamedTuple {tup_name}, field {field}:: Is both annotated with STATIC and DYNAMIC; mutually exclusive")
+            # Check static annotations for validity:
+            if DYNAMIC in custom_annos:
+                if ROOM_SHAPED in custom_annos or CONSTANT_SHAPE in custom_annos:
+                    raise Exception(f"NamedTuple {tup_name}, field {field}:: Dynamic fields may only be SINGLETON_INTEGER or NAMED_TUPLE_STACK")
+                if SINGLETON_INT in custom_annos and NAMED_TUPLE_STACK in custom_annos:
+                    raise Exception(f"NamedTuple {tup_name}, field {field}:: Dynamic fields may not be tagged as both SINGLETON_INT and NAMED_TUPLE_STACK")
+                if SINGLETON_INT not in custom_annos and NAMED_TUPLE_STACK not in custom_annos:
+                    raise Exception(f"NamedTuple {tup_name}, field {field}:: Dynamic fields need to be either annotated as SINGLETON_INT or NAMED_TUPLE_STACK")
+                if NAMED_TUPLE_STACK in custom_annos:
+                    nt_type_annotations = [c for c in custom_annos if cls.is_namedtuple_class(c)]
+                    if len(nt_type_annotations) == 0:
+                        raise Exception(f"NamedTuple {tup_name}, field {field}::  If a field is annotated as NAMED_TUPLE_STACK, an additional NamedTuple class needs to be provided in the annotations which specifies the type of the stacked named tuple.")
+                    if len(nt_type_annotations > 1):
+                        raise Exception(f"NamedTuple {tup_name}, field {field}::  If a field is annotated as NAMED_TUPLE_STACK, an additional NamedTuple class needs to be provided in the annotations which specifies the type of the stacked named tuple.")
+                return None
+            if STATIC in custom_annos:
+                allowed = set([ROOM_SHAPED, NAMED_TUPLE_STACK, SINGLETON_INT, CONSTANT_SHAPE])
+                if len(set(custom_annos).intersection(allowed)) < 1:
+                    raise Exception(f"NamedTuple {tup_name}, field {field}:: All fields need to be annotated with one of the following: [ROOM_SHAPED, NAMED_TUPLE_STACK, SINGLETON_INT, CONSTANT_SHAPE]")
+                if len(set(custom_annos).intersection(allowed)) < 1:
+                    raise Exception(f"NamedTuple {tup_name}, field {field}:: All static fields must have exactly one of the following annotations: [ROOM_SHAPED, NAMED_TUPLE_STACK, SINGLETON_INT, CONSTANT_SHAPE]")
+                if NAMED_TUPLE_STACK in custom_annos:
+                    nt_type_annotations = [c for c in custom_annos if cls.is_namedtuple_class(c)]
+                    if len(nt_type_annotations) == 0:
+                        raise Exception(f"NamedTuple {tup_name}, field {field}::  If a field is annotated as NAMED_TUPLE_STACK, an additional NamedTuple class needs to be provided in the annotations which specifies the type of the stacked named tuple.")
+                    if len(nt_type_annotations > 1):
+                        raise Exception(f"NamedTuple {tup_name}, field {field}::  If a field is annotated as NAMED_TUPLE_STACK, an additional NamedTuple class needs to be provided in the annotations which specifies the type of the stacked named tuple.")
+                
+            return None
     
     @classmethod
     def add_new_named_tuple(cls, tup: NamedTuple, field_enum: Type[Enum], partial_serialisation_fields: List[str] = []):
@@ -588,8 +675,16 @@ class SANTAH():
             partial_serialisation_fields (List[str], optional): Attributes which are saved & recovered
                 during partial serialisation/ deserialisation. Partial serialisation operations 
                 should be used to preserve individual values in the global state. Defaults to [].
+                This is a bit confusing. For ~legacy reasons~, we use this function both to register named tuples 
+                that act as room tags as well as named tuples that are only part of certain fields. When registering named tuples that act as room tags, 
+                the partial_serialization_fields part is basically fully ignored.
         """
+        # In the future, we won't nedd partial serialization fields anymore, and hopefully also not field_enum.
+        cls._check_named_tuple_annotations
+        # TODO: ALL THIS SHIT SHOULD HOPEFULLY BE DEPRECATED SOON 
         # Full serialisation method. Serialises the whole named tuple.
+        if tup.__name__ in cls.registered_named_tuple_names:
+            raise Exception(f"Named tuple with name {tup.__name__} was already registered. No name duplication in registered named tuples allowed.")
         if tup in cls.registered_named_tuple:
             warnings.warn("Named tuple has already been registered; this call has no further effects")
             return None
@@ -604,6 +699,7 @@ class SANTAH():
         
         if tup in cls.registered_room_nt:
             raise Exception("The NamedTuple has already been registered as a Room.")
+        cls.registered_named_tuple_names.append(tup.__name__)
         def serialize_fully(tuple_class: NamedTuple):
             fields: Tuple[str] = tuple_class._fields
             fields = list(fields)

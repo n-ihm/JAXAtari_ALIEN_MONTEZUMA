@@ -875,7 +875,7 @@ class JaxMontezuma(JaxEnvironment[MontezumaState, MontezumaObservation, Montezum
         rope_information: RoomTags.ROPES.value = rope_tag
         rope_top_map: jnp.ndarray = jnp.ones(shape=(self.consts.WIDTH, self.consts.HEIGHT), dtype=jnp.int32)
         # Default value is -1, 
-        # Ropes are painted using their index in the rope_array.
+        # Ropes are inted using their index in the rope_array.
         rope_top_map = rope_top_map*(-1)
         for r_ind in range(rope_information.ropes.shape[0]):
             rope_arr: jArray = rope_information.ropes[r_ind, ...]
@@ -1146,6 +1146,7 @@ class JaxMontezuma(JaxEnvironment[MontezumaState, MontezumaObservation, Montezum
                                                                 )
         return bonus_room_canvas
         
+    
     def __make_room_infra_ready(self):
         #
         # This function prepares the room infrastructure. 

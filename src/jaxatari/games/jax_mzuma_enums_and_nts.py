@@ -1,9 +1,9 @@
-from typing import NamedTuple, Dict, Type
+from typing import NamedTuple, Dict, Type, Annotated
 from enum import Enum
 import jax.numpy as jnp
 from jax import Array as jArray
 import os
-from jaxatari.games.jax_mzuma_utils import SANTAH
+from jaxatari.games.jax_mzuma_utils import SANTAH, DYNAMIC, STATIC, CONSTANT_SHAPE, ROOM_SHAPED, NAMED_TUPLE_STACK, SINGLETON_INT
 
 class GlobalLadderBehavior:
     TELEPORT_ONTO_LADDER_FROM_HORIZONTAL_DISTANCE = jnp.array([5], jnp.uint32) 
@@ -90,19 +90,66 @@ class ConstantShapeRoomFields(Enum):
     bottom_start_position = "bottom_start_position"
 
 
+
+
+class LAZER_BARRIER(NamedTuple): # Contains only barrier specific information. Global information about all barriers in a room is stored in another object.
+    X: Annotated[jnp.ndarray, STATIC, SINGLETON_INT] # X-coordinate of the barrier
+    upper_point: Annotated[jnp.ndarray, STATIC, SINGLETON_INT] # Y-coord of upper barrier edge
+    lower_point: Annotated[jnp.ndarray, STATIC, SINGLETON_INT] # Y coord of lower barrier edge
+
+
+class LAZER_BARRIER_ENUM(Enum):
+    X = "X"
+    upper_point = "upper_point"
+    lower_point = "lower_point"
+    
+
+class GlobalLazerBarrierInfo(NamedTuple):
+    cycle_length: Annotated[jnp.ndarray, STATIC, SINGLETON_INT] # How long the animation cycle for the barriers is 
+    cycle_active_frames: Annotated[jnp.ndarray, STATIC, SINGLETON_INT] # How many frames from the cycle the barrier is active
+    cycle_offset: Annotated[jnp.ndarray, STATIC, SINGLETON_INT] # Per default, barrier is active right from the start. This offset controls how many frames the active period is offset from the start
+    cycle_index: Annotated[jnp.ndarray, DYNAMIC, SINGLETON_INT] # Gives current index in the animation cycle.
+
+class GlobalLazerBarrierInfoEnum(Enum):
+    cycle_length = "cycle_length" 
+    cycle_active_frames = "cycle_active_frames"
+    cycle_offset = "cycle_offset"
+    cycle_index = "cycle_index"
+    
+
 class MandatoryLazerBarrierFields(NamedTuple):
-    barriers: jnp.ndarray
-    global_barrier_info: jnp.ndarray
-    global_barrier_map: jnp.ndarray # A collision map for all lazer barriers in the room
+    barriers: Annotated[jnp.ndarray, STATIC, NAMED_TUPLE_STACK, LAZER_BARRIER]
+    global_barrier_info: Annotated[jnp.ndarray, DYNAMIC, NAMED_TUPLE_STACK, GlobalLazerBarrierInfo]
+    global_barrier_map: Annotated[jnp.ndarray, STATIC, ROOM_SHAPED] # A collision map for all lazer barriers in the room
 class MandatoryLazerBarrierFieldsEnum(Enum):
     barriers = "barriers"
     global_barrier_info = "global_barrier_info"
     global_barrier_map = "global_barrier_map"
     
+class Item_Sprites(Enum):
+    GEM = 0
+    HAMMER = 1
+    KEY = 2
+    SWORD = 3
+    TORCH = 4
+    TORCH_FRAME_2 = 5
+
+class Item(NamedTuple):
+    sprite: Annotated[Item_Sprites, STATIC, SINGLETON_INT] # Actual jnp.array
+    x: Annotated[jnp.ndarray, STATIC, SINGLETON_INT]
+    y: Annotated[jnp.ndarray, STATIC, SINGLETON_INT]
+    on_field: Annotated[jnp.ndarray, DYNAMIC, SINGLETON_INT]
+    
+class ItemEnum(Enum):
+    sprite = "sprite"
+    x = "x"
+    y = "y"
+    on_field = "on_field"
+
     
     
 class MandatoryItemFields(NamedTuple):
-    items: jnp.ndarray
+    items: Annotated[jnp.ndarray, DYNAMIC, NAMED_TUPLE_STACK, Item]
 class MandatoryItemFieldsEnum(Enum):
     items = "items"
     
@@ -116,10 +163,10 @@ class MandatoryDarkroomFieldsEnum(Enum):
     pass
 
 class MandatoryBonusRoomFields(NamedTuple):
-    bouns_cycle_index: jnp.ndarray # How many frames the player has been in the bonus room
-    bonus_cycle_lenght: jnp.ndarray # How long the player stays in the bonus room
-    bonus_room_floor_collison_map: jnp.ndarray
-    reset_state_on_leave: jArray # This is used to reset the room map in the case where leaving the bonus room doesn't cause the player 
+    bouns_cycle_index: Annotated[jnp.ndarray, DYNAMIC, SINGLETON_INT] # How many frames the player has been in the bonus room
+    bonus_cycle_lenght: Annotated[jnp.ndarray, STATIC, SINGLETON_INT] # How long the player stays in the bonus room
+    bonus_room_floor_collison_map: Annotated[jnp.ndarray, STATIC, ROOM_SHAPED]
+    reset_state_on_leave: Annotated[jArray, STATIC, SINGLETON_INT] # This is used to reset the room map in the case where leaving the bonus room doesn't cause the player 
         # to enter a new level, but just to loop in the current level.
 class MandatoryBonusRoomFieldsEnum(Enum):
     bouns_cycle_index = "bouns_cycle_index"
@@ -128,13 +175,39 @@ class MandatoryBonusRoomFieldsEnum(Enum):
     reset_state_on_leave = "reset_state_on_leave"
     
     
+class ConveyorBelt(NamedTuple):
+    x: Annotated[jArray, STATIC, SINGLETON_INT]
+    y: Annotated[jArray, STATIC, SINGLETON_INT]
+    movement_dir: Annotated[jArray, STATIC, SINGLETON_INT]
+    color: Annotated[jArray, STATIC, SINGLETON_INT] # Just color index
+
+class ConveyorBeltEnum(Enum):
+    x = "x"
+    y = "y"
+    movement_dir = "movement_dir"
+    color = "color"
+    
+class Door(NamedTuple):
+    x: Annotated[jArray, STATIC, SINGLETON_INT]
+    y: Annotated[jArray, STATIC, SINGLETON_INT]
+    on_field: Annotated[jArray, DYNAMIC, SINGLETON_INT]
+    color: Annotated[jArray, STATIC, SINGLETON_INT]
+    
+class DoorEnum(Enum):
+    x = "x"
+    y = "y"
+    on_field = "on_field"
+    color = "color"
+
+
 class MandatoryConveyorBeltFields(NamedTuple):
-    conveyor_belts: jnp.ndarray
-    global_conveyor_collision_map: jnp.ndarray
+    conveyor_belts: Annotated[jnp.ndarray, STATIC, NAMED_TUPLE_STACK, ConveyorBelt]
+    global_conveyor_collision_map: Annotated[jnp.ndarray, STATIC, ROOM_SHAPED]
     # Seperate maps for collision & movement detection
-    global_conveyor_movement_collision_map: jnp.ndarray
-    global_conveyor_render_map: jnp.ndarray
-        
+    global_conveyor_movement_collision_map: Annotated[jnp.ndarray, STATIC, ROOM_SHAPED]
+    global_conveyor_render_map: Annotated[jnp.ndarray, STATIC, ROOM_SHAPED]
+
+
         
 class MandatoryConveyorBeltFieldsEnum(Enum):
     conveyor_belts = "conveyor_belts"
@@ -144,21 +217,40 @@ class MandatoryConveyorBeltFieldsEnum(Enum):
     
     
 class MandatoryDoorFields(NamedTuple):
-    doors: jnp.ndarray
-    global_collision_map: jnp.ndarray
+    doors: Annotated[jnp.ndarray, DYNAMIC, NAMED_TUPLE_STACK, Door]
+    global_collision_map: Annotated[jnp.ndarray, STATIC, ROOM_SHAPED] # (only 2D, static, doors are denoted via index)
 class MandatoryDoorFieldsEnum(Enum):
     doors = "doors"
     global_collision_map = "global_collision_map"
 
+
+class DropoutFloor(NamedTuple):
+    x: Annotated[jnp.ndarray, STATIC, SINGLETON_INT]
+    y: Annotated[jnp.ndarray, STATIC, SINGLETON_INT]
+    sprite_height_amount: Annotated[jnp.ndarray, STATIC, SINGLETON_INT]
+    sprite_width_amount: Annotated[jnp.ndarray, STATIC, SINGLETON_INT]
+    sprite_index: Annotated[jnp.ndarray, STATIC, SINGLETON_INT]
+    collision_padding_top: Annotated[jnp.ndarray, STATIC, SINGLETON_INT]
+    color: Annotated[jnp.ndarray, STATIC, SINGLETON_INT]
+    
+class DropoutFloorEnum(Enum):
+    x = "x"
+    y = "y"
+    sprite_height_amount = "sprite_height_amount"
+    sprite_width_amount = "sprite_width_amount"
+    sprite_index = "sprite_index"
+    collision_padding_top = "collision_padding_top"
+    color = "color"
+
     
 class MandatoryDropoutFloorFields(NamedTuple):
-    dropout_floors: jnp.ndarray
+    dropout_floors: Annotated[jnp.ndarray, STATIC, NAMED_TUPLE_STACK, DropoutFloor]
     # The fraction of "on-time" vs "off-time" for Dropout floors
     # can be adjusted on a per-room basis.
-    on_time_dropoutfloor: jnp.ndarray
-    off_time_dropoutfloor: jnp.ndarray
-    dropout_floor_render_maps: jnp.ndarray
-    dropout_floor_colision_map: jnp.ndarray
+    on_time_dropoutfloor: Annotated[jnp.ndarray, STATIC, SINGLETON_INT]
+    off_time_dropoutfloor: Annotated[jnp.ndarray, STATIC, SINGLETON_INT]
+    dropout_floor_render_maps: Annotated[jnp.ndarray, STATIC, ROOM_SHAPED]
+    dropout_floor_colision_map: Annotated[jnp.ndarray, STATIC, ROOM_SHAPED]
     
     
 class MandatoryDropoutFloorFieldsEnum(Enum):
@@ -170,9 +262,10 @@ class MandatoryDropoutFloorFieldsEnum(Enum):
     
     
 class MandatoryPitFields(NamedTuple):
-    starting_pos_y : jnp.ndarray
-    pit_color : jnp.ndarray
-    pit_render_maps: jnp.ndarray
+    starting_pos_y : Annotated[jnp.ndarray, STATIC, SINGLETON_INT]
+    pit_color : Annotated[jnp.ndarray, STATIC, SINGLETON_INT]
+    pit_render_maps: Annotated[jnp.ndarray, STATIC, ROOM_SHAPED] # TODO: This will break right now, as it
+                # the first dimension is index, and will be resized to room-size. Need to switch dimensions around
 
 
 class MandatoryPitFieldsEnum(Enum):
@@ -182,11 +275,11 @@ class MandatoryPitFieldsEnum(Enum):
     
     
 class MandatorySidewallsFields(NamedTuple):
-    is_left: jnp.ndarray
-    is_right: jnp.ndarray
-    side_wall_color: jnp.ndarray
-    side_walls_render_map: jnp.ndarray
-    side_walls_collision_map: jnp.ndarray
+    is_left: Annotated[jnp.ndarray, STATIC, SINGLETON_INT]
+    is_right: Annotated[jnp.ndarray, STATIC, SINGLETON_INT]
+    side_wall_color: Annotated[jnp.ndarray, STATIC, SINGLETON_INT]
+    side_walls_render_map: Annotated[jnp.ndarray, STATIC, ROOM_SHAPED]
+    side_walls_collision_map: Annotated[jnp.ndarray, STATIC, ROOM_SHAPED]
 
 
 class MandatorySidewallsFieldsEnum(Enum):
@@ -198,12 +291,12 @@ class MandatorySidewallsFieldsEnum(Enum):
 
     
 class Rope(NamedTuple):
-    x_pos: jArray
-    top: jArray
-    bottom: jArray
-    color_index: jArray
-    is_climbable: jArray
-    accessible_from_top: jArray
+    x_pos: Annotated[jnp.ndarray, STATIC, SINGLETON_INT]
+    top: Annotated[jnp.ndarray, STATIC, SINGLETON_INT]
+    bottom: Annotated[jnp.ndarray, STATIC, SINGLETON_INT]
+    color_index: Annotated[jnp.ndarray, STATIC, SINGLETON_INT]
+    is_climbable: Annotated[jnp.ndarray, STATIC, SINGLETON_INT]
+    accessible_from_top: Annotated[jnp.ndarray, STATIC, SINGLETON_INT]
     # A int32 flag signalling whether the rope is accessible from the top, i.e. whether we can get on/ off it from the top
     
 
@@ -217,22 +310,22 @@ class RopeEnum(Enum):
     
     
 class MandatoryRopeFields(NamedTuple):
-    ropes: jArray # A stack of ropes which are in the room
-    rope_index: jArray # The index of the rope the player is currently hanging from.
+    ropes: Annotated[jnp.ndarray, STATIC, NAMED_TUPLE_STACK, Rope] # A stack of ropes which are in the room
+    rope_index: Annotated[jnp.ndarray, DYNAMIC, SINGLETON_INT] # The index of the rope the player is currently hanging from.
     # If player isn't on rope, this is -1
-    rope_render_map: jArray # A precomputed render map for the ropes
-    rope_colision_map: jArray # A precomputed colision map. Includes only the climbeable ropes, 
+    rope_render_map: Annotated[jnp.ndarray, STATIC, ROOM_SHAPED] # A precomputed render map for the ropes
+    rope_colision_map: Annotated[jnp.ndarray, STATIC, ROOM_SHAPED] # A precomputed colision map. Includes only the climbeable ropes, 
     # and rope values in the map correspond to the position of the ropes in the array + 1
-    last_hanged_on_rope: jArray # The rope the player was climbing on the last time he was on a rope.
+    last_hanged_on_rope: Annotated[jnp.ndarray, DYNAMIC, SINGLETON_INT] # The rope the player was climbing on the last time he was on a rope.
     # This is used to prevent the player from repeatedly regrabbing the same rope, which is not intended behavior. 
     # This gets reset to a default value of -1 every time the player touches the floor.
-    room_surfaces: jArray
+    room_surfaces: Annotated[jnp.ndarray, STATIC, ROOM_SHAPED]
     # A utility hitmap of the room in which only floor/ platform surfaces are highlighted. 
     # A surface is the pixel-layer right above a solid collision map. 
     # Surfaces have values of 1, everything else 0
     # This has the size of the full room collision hitmap with padding.
     # For surfaces, only collision elements defined at room initialization can be considered. 
-    room_rope_top_pixels: jArray
+    room_rope_top_pixels: Annotated[jnp.ndarray, STATIC, ROOM_SHAPED]
     # This is a hitmap for the top pixels of the rope. 
     # Default value is -1, and the top ropes are set with their index in the rope stack.
 class MandatoryRopeFieldsEnum(Enum):
@@ -245,20 +338,51 @@ class MandatoryRopeFieldsEnum(Enum):
     room_rope_top_pixels = "room_rope_top_pixels"
 
 
+class Ladder(NamedTuple):
+    left_upper_x: Annotated[jnp.ndarray, STATIC, SINGLETON_INT] # X coord of left, upper corner
+    left_upper_y: Annotated[jnp.ndarray, STATIC, SINGLETON_INT] # y coord of left, upper corner
+    right_lower_x: Annotated[jnp.ndarray, STATIC, SINGLETON_INT] # ...
+    right_lower_y: Annotated[jnp.ndarray, STATIC, SINGLETON_INT] # ...
+    has_background: Annotated[jnp.ndarray, STATIC, SINGLETON_INT] # Whether a background is rendered
+    rope_seeking_at_top: Annotated[jnp.ndarray, STATIC, SINGLETON_INT] # Whether this ladder directly connects to another ladder at the top 
+        # in another room. If it is set to 1, upon entering the next room, the game will seek the nearest 
+        # ladder top/ bottom and snap to it
+    rope_seeking_at_bottom: Annotated[jnp.ndarray, STATIC, SINGLETON_INT] # Same but for the bottom
+    transparent_background: Annotated[jnp.ndarray, STATIC, SINGLETON_INT] # Binary integer array, says whether background is transparent
+    transparent_foreground: Annotated[jnp.ndarray, STATIC, SINGLETON_INT] # Binary integer array, says whether foreground is transparent
+    foreground_color: Annotated[jnp.ndarray, STATIC, SINGLETON_INT] # Foreground color index
+    background_color: Annotated[jnp.ndarray, STATIC, SINGLETON_INT] # Background color index
+
+
+class LadderFields(Enum):
+    left_upper_x = "left_upper_x"
+    left_upper_y = "left_upper_y"
+    right_lower_x = "right_lower_x"
+    right_lower_y = "right_lower_y"
+    has_background = "has_background"
+    rope_seeking_at_top = "rope_seeking_at_top" 
+    rope_seeking_at_bottom = "rope_seeking_at_bottom"
+    transparent_background = "transparent_background"
+    transparent_foreground = "transparent_foreground"
+    
+    foreground_color = "foreground_color"
+    background_color = "background_color"
+
+
 
 class MandatoryLadderFields(NamedTuple):
-    ladders: jArray # A scalar named tuple stack containing the ladders
-    ladder_index: jArray # Integer index of the ladder the player is currently on,
+    ladders: Annotated[jnp.ndarray, STATIC, NAMED_TUPLE_STACK, Ladder] # A scalar named tuple stack containing the ladders
+    ladder_index: Annotated[jnp.ndarray, DYNAMIC, SINGLETON_INT] # Integer index of the ladder the player is currently on,
     # if not on ladder: ladder_index is -1
         
-    ladder_tops: jArray # A hitmap containing all the collision zones for entering a ladder at the TOP.
+    ladder_tops: Annotated[jnp.ndarray, STATIC, ROOM_SHAPED] # A hitmap containing all the collision zones for entering a ladder at the TOP.
         # A value of -1 means no ladder can be entered here, 
         # All other values are the indexes of the ladders that live there
-    ladder_bottoms: jArray # A hitmap containing all the collision zones for entering a ladder at the BOTTOM
+    ladder_bottoms: Annotated[jnp.ndarray, STATIC, ROOM_SHAPED] # A hitmap containing all the collision zones for entering a ladder at the BOTTOM
         # A value of -1 means no ladder can be entered here, 
         # All other values are the indexes of the ladders that live there
-    ladders_sprite: jArray # A full-size sprite map with containing all the collision zones for leaving a ladder
-    ladder_room_surface_pixels: jArray
+    ladders_sprite: Annotated[jnp.ndarray, STATIC, ROOM_SHAPED] # A full-size sprite map with containing all the collision zones for leaving a ladder
+    ladder_room_surface_pixels: Annotated[jnp.ndarray, STATIC, ROOM_SHAPED]
     # This is a hitmap for the top pixels of the rope. 
     # Default value is -1, and the top ropes are set with their index in the rope stack.
 
@@ -271,9 +395,34 @@ class MandatoryLadderFieldsEnum(Enum):
     ladders_sprite = "ladders_sprite"
     ladder_room_surface_pixels = "ladder_room_surface_pixels"
 
+    
+class Enemy(NamedTuple):
+    bbox_left_upper_x: Annotated[jnp.ndarray, STATIC, SINGLETON_INT] # Corner coordinates of the bounding box in which the enemy lives
+        # the enemy ignores all level geometry and moves freely inside the bounding box.
+    bbox_left_upper_y: Annotated[jnp.ndarray, STATIC, SINGLETON_INT]
+    bbox_right_lower_x: Annotated[jnp.ndarray, STATIC, SINGLETON_INT]
+    bbox_right_lower_y: Annotated[jnp.ndarray, STATIC, SINGLETON_INT]
+    enemy_type: Annotated[jnp.ndarray, STATIC, SINGLETON_INT] # Enemy type. Needs to have a value in the EnemyType enum
+    alive: Annotated[jnp.ndarray, DYNAMIC, SINGLETON_INT] # Whether the enemy is currently alive
+    pos_x: Annotated[jnp.ndarray, DYNAMIC, SINGLETON_INT]
+    pos_y: Annotated[jnp.ndarray, DYNAMIC, SINGLETON_INT]
+    horizontal_direction: Annotated[jnp.ndarray, DYNAMIC, SINGLETON_INT] # the horizontal direction in which the enemy is currently moving
+    last_movement: Annotated[jnp.ndarray, DYNAMIC, SINGLETON_INT] # How long ago the last movement occured
+    sprite_index: Annotated[jnp.ndarray, DYNAMIC, SINGLETON_INT] # Which sprite is currently to be rendered
+    render_in_reverse: Annotated[jnp.ndarray, DYNAMIC, SINGLETON_INT] # Whether the sprites are currently rendered in reverse order
+    initial_x_pos: Annotated[jnp.ndarray, STATIC, SINGLETON_INT] # Start position of the enemy.
+    initial_y_pos: Annotated[jnp.ndarray, STATIC, SINGLETON_INT]
+    initial_horizontal_direction: Annotated[jnp.ndarray, STATIC, SINGLETON_INT] # Initial movement direction of the enemy.
+    initial_render_in_reverse: Annotated[jnp.ndarray, STATIC, SINGLETON_INT]
+    optional_movement_counter: Annotated[jnp.ndarray, DYNAMIC, SINGLETON_INT] # An optional counter for movement. 
+        # For enemies that have complex movement patterns (like bouncing skulls)
+        # This field is used to signify the current position in the cycle
+        # For other enemies, it is unused.
+    last_animation: Annotated[jnp.ndarray, DYNAMIC, SINGLETON_INT] # How many frames ago the enemy was last animated.
+    optional_utility_field: Annotated[jnp.ndarray, DYNAMIC, SINGLETON_INT] # We use this one to split the bouncing skull enemy into two
 
 class MandatoryEnemyFields(NamedTuple):
-    enemies: jArray
+    enemies: Annotated[jnp.ndarray, DYNAMIC, NAMED_TUPLE_STACK]
     
 class MandatoryEnemyFieldsEnum(Enum):
     enemies = "enemies"
@@ -314,107 +463,14 @@ class FieldsThatAreSharedByAllRoomsButHaveDifferentShape(Enum):
     room_collision_map = "room_collision_map"
     
     
-class Ladder(NamedTuple):
-    left_upper_x: jArray # X coord of left, upper corner
-    left_upper_y: jArray # y coord of left, upper corner
-    right_lower_x: jArray # ...
-    right_lower_y: jArray # ...
-    has_background: jArray # Whether a background is rendered
-    rope_seeking_at_top: jArray # Whether this ladder directly connects to another ladder at the top 
-        # in another room. If it is set to 1, upon entering the next room, the game will seek the nearest 
-        # ladder top/ bottom and snap to it
-    rope_seeking_at_bottom: jArray # Same but for the bottom
-    transparent_background: jArray # Binary integer array, says whether background is transparent
-    transparent_foreground: jArray # Binary integer array, says whether foreground is transparent
-    foreground_color: jArray # Foreground colors in RGB, values [0, 255]
-    background_color: jArray# Background color in RGB, values [0, 255]
-
-
-class LadderFields(Enum):
-    left_upper_x = "left_upper_x"
-    left_upper_y = "left_upper_y"
-    right_lower_x = "right_lower_x"
-    right_lower_y = "right_lower_y"
-    has_background = "has_background"
-    rope_seeking_at_top = "rope_seeking_at_top" 
-    rope_seeking_at_bottom = "rope_seeking_at_bottom"
-    transparent_background = "transparent_background"
-    transparent_foreground = "transparent_foreground"
-    
-    foreground_color = "foreground_color"
-    background_color = "background_color"
-
 
 
 
     
-class LAZER_BARRIER(NamedTuple): # Contains only barrier specific information. Global information about all barriers in a room is stored in another object.
-    X: jnp.ndarray # X-coordinate of the barrier
-    upper_point: jnp.ndarray # Y-coord of upper barrier edge
-    lower_point: jnp.ndarray # Y coord of lower barrier edge
-
-
-class LAZER_BARRIER_ENUM(Enum):
-    X = "X"
-    upper_point = "upper_point"
-    lower_point = "lower_point"
-    
-class ConveyorBelt(NamedTuple):
-    x: jnp.ndarray
-    y: jnp.ndarray
-    movement_dir: jnp.ndarray
-    color: jnp.ndarray
-
-class ConveyorBeltEnum(Enum):
-    x = "x"
-    y = "y"
-    movement_dir = "movement_dir"
-    color = "color"
-    
-class Door(NamedTuple):
-    x: jnp.ndarray
-    y: jnp.ndarray
-    on_field: jnp.ndarray
-    color: jnp.ndarray
-    
-class DoorEnum(Enum):
-    x = "x"
-    y = "y"
-    on_field = "on_field"
-    color = "color"
     
     
-class DropoutFloor(NamedTuple):
-    x: jnp.ndarray
-    y: jnp.ndarray
-    sprite_height_amount: jnp.ndarray
-    sprite_width_amount: jnp.ndarray
-    sprite_index: jnp.ndarray
-    collision_padding_top: jnp.ndarray
-    color: jnp.ndarray
-    
-class DropoutFloorEnum(Enum):
-    x = "x"
-    y = "y"
-    sprite_height_amount = "sprite_height_amount"
-    sprite_width_amount = "sprite_width_amount"
-    sprite_index = "sprite_index"
-    collision_padding_top = "collision_padding_top"
-    color = "color"
     
 
-class GlobalLazerBarrierInfo(NamedTuple):
-    cycle_length: jnp.ndarray # How long the animation cycle for the barriers is 
-    cycle_active_frames: jnp.ndarray # How many frames from the cycle the barrier is active
-    cycle_offset: jnp.ndarray # Per default, barrier is active right from the start. This offset controls how many frames the active period is offset from the start
-    cycle_index: jnp.ndarray # Gives current index in the animation cycle.
-
-class GlobalLazerBarrierInfoEnum(Enum):
-    cycle_length = "cycle_length" 
-    cycle_active_frames = "cycle_active_frames"
-    cycle_offset = "cycle_offset"
-    cycle_index = "cycle_index"
-    
 
 class Room(NamedTuple): # This class should contain all attributes that are shared by ALL TYPES OF ROOMS
     height: jnp.ndarray
@@ -753,18 +809,6 @@ class ItemBar_Sprites(Enum):
     
 
 
-class Item(NamedTuple):
-    sprite: Item_Sprites
-    x: jnp.ndarray
-    y: jnp.ndarray
-    on_field: jnp.ndarray
-    
-class ItemEnum(Enum):
-    sprite = "sprite"
-    x = "x"
-    y = "y"
-    on_field = "on_field"
-
 class Dropout_Floor_Sprites(Enum):
     PIT_FLOOR = 0
     LADDER_FLOOR = 1
@@ -775,31 +819,7 @@ class EnemyType(Enum):
     ROLL_SKULL = 1
     BOUNCE_SKULL = 2
     SPIDER = 3
-    
-class Enemy(NamedTuple):
-    bbox_left_upper_x: jArray # Corner coordinates of the bounding box in which the enemy lives
-        # the enemy ignores all level geometry and moves freely inside the bounding box.
-    bbox_left_upper_y: jArray
-    bbox_right_lower_x: jArray
-    bbox_right_lower_y: jArray
-    enemy_type: jArray # Enemy type. Needs to have a value in the EnemyType enum
-    alive: jArray # Whether the enemy is currently alive
-    pos_x: jArray
-    pos_y: jArray
-    horizontal_direction: jArray # the horizontal direction in which the enemy is currently moving
-    last_movement: jArray # How long ago the last movement occured
-    sprite_index: jArray # Which sprite is currently to be rendered
-    render_in_reverse: jArray # Whether the sprites are currently rendered in reverse order
-    initial_x_pos: jArray # Start position of the enemy.
-    initial_y_pos: jArray
-    initial_horizontal_direction: jArray # Initial movement direction of the enemy.
-    initial_render_in_reverse: jArray
-    optional_movement_counter: jArray # An optional counter for movement. 
-        # For enemies that have complex movement patterns (like bouncing skulls)
-        # This field is used to signify the current position in the cycle
-        # For other enemies, it is unused.
-    last_animation: jArray # How many frames ago the enemy was last animated.
-    optional_utility_field: jArray # We use this one to split the bouncing skull enemy into two
+
     
 class BounceSkullAliveState(Enum):
     FULLY_ALIVE = 0
