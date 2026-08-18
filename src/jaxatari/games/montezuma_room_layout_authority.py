@@ -1,5 +1,5 @@
-from jaxatari.games.jax_mzuma_utils import SANTAH, DYNAMIC, STATIC, CONSTANT_SHAPE, ROOM_SHAPED, NAMED_TUPLE_STACK, SINGLETON_INT, TagNamedTuple, VanillaRoom, RoomConnectionObject, RequiredRoomFields, NamedTupleFieldType
-from typing import NamedTuple, get_type_hints, Annotated, get_origin, get_args, Optional, Type, Callable, Dict, Any
+from jaxatari.games.jax_mzuma_utils import SANTAH, DYNAMIC, STATIC, CONSTANT_SHAPE, ROOM_SHAPED, NAMED_TUPLE_STACK, SINGLETON_INT, TagNamedTuple, VanillaRoom, RoomConnectionObject, RequiredRoomFields, NamedTupleFieldType, RoomConnectionDirections, Room
+from typing import NamedTuple, get_type_hints, Annotated, get_origin, get_args, Optional, Type, Callable, Dict, Any, List, Tuple
 from enum import Enum
 import warnings
 from jaxatari.games.jax_montezuma_constants import *
@@ -9,409 +9,124 @@ from jaxatari.games.jax_mzuma_utils import PyramidLayout
 
 
 class NewRoom:
-    def __init__(self, room_id: int, underlyingTupleClass: NamedTuple):
-        """Initialization method for the "Room" handler class. 
-           At its core, it wraps around a tuple of the underlyingTupleClass
-           and provides a convenient wrapper around individual instances of the
-           Named Tuple. Rooms are automatically tracked by the layout manager & integrated with the 
-           persistence infrastructure. 
-           
-           Provides the option to set individual fields to Arrays, Lists of Scalar valued Integer Named tuples, 
-           and singleton arrays. 
-           ScalarValuedIntegerNamedTuples need to always be registered at the ScalarNamedIntegerTupleDeserialisaitonHandler first.
-
-        Args:
-            room_id (int): ID of the underlying Room
-            underlyingTupleClass (NamedTuple): NamedTuple Class that gives the basis for the room-tuple this object wraps around.
-        """
-        self.underlyingTupleClass: NamedTuple = underlyingTupleClass
+    def __init__(self, room_id: int, base_class: type[NamedTuple], tags: list[type[NamedTuple]] = []):
+        #
+        # TODO: Have this called by the new room authority class. 
+        # don't let user touch it themselves
+        #
+        #
+        self.base_class: type[NamedTuple] = base_class
         self.room_id: int = room_id
+        self.tags = tags
         self.connection_object: RoomConnectionObject = RoomConnectionObject(room_id=self.room_id)
-        self.field_contents: Dict[str, Any] = {}
-        self.field_contents[RequiredRoomFields.ROOM_ID.value] = jnp.array([self.room_id], dtype=jnp.uint16)
-        self.field_persistent: Dict[str, bool] = {} # Whether a certain field is supposed to be stored in the 
-            # persistant global storage. 
-        # Room-IDs may never change, so they don't require persistence.
-        self.field_persistent[RequiredRoomFields.ROOM_ID.value] = False
-        self.field_type: Dict[str, NamedTupleFieldType] = {} # type of content in this field.
-        self.field_type[RequiredRoomFields.ROOM_ID.value] = NamedTupleFieldType.INTEGER_SCALAR
-        self.field_named_tuples: Dict[str, NamedTuple] = {} # for all fields that are supposed to be synchronized to 
-            # the required global storage and have a namedtuple as value, the class of the named_tuple is stored in here. 
-        self.present_fields: List[str] = list(self.underlyingTupleClass._fields)
-        if not RequiredRoomFields.ROOM_ID.value in self.present_fields:
+        self.base_class_fields: Dict[str, jArray|List[NamedTuple]] = {}
+        self.base_class_fields[RequiredRoomFields.ROOM_ID.value] = jnp.array([self.room_id], dtype=jnp.uint16)
+        self.tag_fields: dict[type[NamedTuple], dict[str, jArray|List[NamedTuple]]] = {}
+         
+        self.base_class_required_fields: List[str] = list(self.base_class._fields)
+        if not RequiredRoomFields.ROOM_ID.value in self.base_class_fields:
             raise Exception("All NamedTuples representing individual rooms are required to have a 'ROOM_ID' field")
         
         
         
-    def set_field(self, field_name: str, field_type: NamedTupleFieldType, content: jnp.ndarray|List[NamedTuple], requires_serialisation: bool = False, named_tuple_type: NamedTuple=None):
+    def set_field(self, field_name: str, content: jnp.ndarray|List[NamedTuple], tag: type[NamedTuple]|None):
         """The main method through which fields of individual rooms are set.
-        Args:
-            field_name (str): name of the field for which the value is to be set. 
-                This field name is required to actually be a field in the given namedtuple subclass.
-            field_type (NamedTupleFieldType): Type of the field to be set. This can either be integer singleton array, 
-                arbitrary array, or a list of NamedTuples which are eventually stored as an array. 
-                If it is a list of named tuples, all need to have the same type.
-            content (jnp.ndarray | List[NamedTuple]): Content of the field as described above.
-            requires_serialisation (bool, optional): Whether the field is supposed to be serialised to the global state
-                CAUTION: ONLY SINGLETON INTEGER FIELDS OR NAMED TUPLE FIELDS SUPPORT SYNCHRONISATION TO THE GLOBAL STATE. Defaults to False.
         """
+        if tag is not None and tag not in self.tags:
+            raise Exception(f"Attemptet to set field for tag {tag.__name__}; Tag not present in the room")
         # Check whether valid field content was passed.
-        if not field_name in self.present_fields:
-            raise Exception("Attempted to add content to a field that is not present in the underlying namedtuple")
         if field_name == RequiredRoomFields.ROOM_ID.value:
             raise Exception("Cannot overwrite the fixed field 'ROOM_ID'")
-        if field_type == NamedTupleFieldType.INTEGER_SCALAR:
-            if not isinstance(content, jArray):
-                raise Exception("Missmatch between stated field_type and given field_type")
-            data: jnp.ndarray = content
-            if not data.dtype == jnp.int32:
-                raise Exception("Cannot support non int32 singleton arrays")
-            if data.shape != (1,):
-                raise Exception("Only support singleton arrays of shape '(1, )'")
-            self.field_contents[field_name] = data
-            self.field_persistent[field_name] = requires_serialisation
-            self.field_type[field_name] = NamedTupleFieldType.INTEGER_SCALAR
-            
-        elif field_type == NamedTupleFieldType.NAMED_TUPLE_STACK:
-            if named_tuple_type is None:
-                raise Exception("If a list of named tuples is provided as field content, a NamedTupleType needs to be given as well")
-            if not isinstance(content, List):
-                raise Exception("Expected a list of NamedTupleObjects as content")
-            for i in content:
-                if not isinstance(i, named_tuple_type):
-                    raise Exception("All items in the list need to be of the required named_tuple_type")
-            if named_tuple_type not in SANTAH.full_serialisations:
-                raise Exception("The NamedTupleType need to be registered with the ScalarNamedTupleDeserialisationHandler")
-            field_content: jArray = jnp.zeros((len(content), SANTAH.fully_serialised_sizes[named_tuple_type]), dtype=jnp.int32)
-            for i, d in enumerate(content):
-                serialised = SANTAH.full_serialisations[named_tuple_type](d)
-                field_content = field_content.at[i, ...].set(serialised)
-            self.field_contents[field_name] = field_content
-            self.field_persistent[field_name] = requires_serialisation
-            self.field_type[field_name] = NamedTupleFieldType.NAMED_TUPLE_STACK
-            self.field_named_tuples[field_name] = named_tuple_type
-            
-        elif field_type == NamedTupleFieldType.OTHER_ARRAY:
-            if requires_serialisation:
-                raise Exception("Cannot serialise field of type 'OTHER_ARRAY'")
-            self.field_contents[field_name] = content
-            self.field_persistent[field_name] = False
-            self.field_type[field_name] = NamedTupleFieldType.OTHER_ARRAY
 
-        elif field_type == NamedTupleFieldType.ROOM_SIZED_ARRAY:
-            if requires_serialisation:
-                raise Exception("Cannot serialise field of type 'ROOM_SIZED_ARRAY'")
-            if not isinstance(content, jArray):
-                raise Exception("ROOM_SIZED_ARRAY content must be a jax/numpy array")
-            if content.ndim < 2:
-                raise Exception("ROOM_SIZED_ARRAY fields must have at least 2 dimensions (dim 1 is the room-height dimension)")
-            self.field_contents[field_name] = content
-            self.field_persistent[field_name] = False
-            self.field_type[field_name] = NamedTupleFieldType.ROOM_SIZED_ARRAY
-            
-            
-    def get_jitted_room_constructor(self)->Callable[[], NamedTuple]:
-        """Returns a jitted function that constructs the room-namedtuple specified by this object.
+        if not MontezumaRoomLayoutAuthority.validate_field_contents(tag, field_name, content):
+            tag_name = tag.__name__ if tag else self.base_class.__name__
+            raise Exception(f"Validation failed for field '{field_name}' in {tag_name}")
 
-        Returns:
-            Callable[[], NamedTuple]: _description_
-        """
-        
-        # Collect all the fields that need to be constructed according to the Tags this room implements.
-        implemented_tags: Tuple[Enum] = SANTAH.room_tags[self.underlyingTupleClass]
-        tag_constructed_fields = set([])
-        for tag in implemented_tags:
-            if tag in SANTAH.tag_based_room_constructor_fields:
-                constructed_fields = SANTAH.tag_based_room_constructor_fields[tag].keys()
-                tag_constructed_fields = tag_constructed_fields.union(set(constructed_fields))
-                
-
-        if set(self.field_contents.keys()).union(list(SANTAH._fields_constructor[self.underlyingTupleClass].keys())).union(
-            
-            list(SANTAH._vanilla_room_field_constructors.keys())).union(tag_constructed_fields) != set(self.present_fields):
-            # Fields for which an explicit constructor is given are not required to be
-            # initialized manually
-            # Explicit constructor can either be given at the proto room level, at the tag level or at the per-room level. 
-            # Per room level takes precedence over proto room level & the tag level
-            raise Exception("Not all fields are set. All fields need to be set before generating infrastructure functions.")
-        # For all constructed fields for which an init value is used, the init value is used 
-        # to initialize the respective fields of the named tuple used to construct the default fields. 
-        # For all remaining fields, a default value is used.
-        
-        if SANTAH.vanilla_room is None:
-            raise Exception("Vanilla Room has not been set.")
-        for k in list(SANTAH._fields_constructor[self.underlyingTupleClass].keys()):
-            if k in self.field_contents:
-                if self.field_type[k] != NamedTupleFieldType.OTHER_ARRAY:
-                    raise Exception("Fields for which an explicit constructor is given on a per-room basis may only be declared as type 'OTHER_ARRAY'.")
-        #
-        # Check that If a constructor initialized field has already been given a default value, 
-        # it is only declares as OTHER_ARRAY.
-        #
-        #
-        
-        for k in list(SANTAH._vanilla_room_field_constructors.keys()):
-            if k in self.field_contents:
-                if self.field_type[k] != NamedTupleFieldType.OTHER_ARRAY:
-                    raise Exception("Fields for which an explicit constructor is given on the proto-room level may only be declared as type 'OTHER_ARRAY'.")
-        
-        for k in list(tag_constructed_fields):
-            if k in self.field_contents:
-                if self.field_type[k] != NamedTupleFieldType.OTHER_ARRAY:
-                    raise Exception("Fields for which an explicit constructor is given on the tag level may only be declared as type 'OTHER_ARRAY'.")
-        
-        
-        
-        # Get the values for all constructed fields
-        #
-        constructed_fields: List[str] = list(SANTAH._fields_constructor[self.underlyingTupleClass].keys())
-        constructed_fields.extend(list(SANTAH._vanilla_room_field_constructors.keys()))
-        constructed_fields.extend(list(tag_constructed_fields))
-        init_field_content_underlying_tuple_class: Dict[str, Any] = copy.deepcopy(self.field_contents)
-        init_field_content_vanilla_room: Dict[str, Any] = {}
-        default_fs: List[str] = list(set(constructed_fields).difference(set(list(self.field_contents.keys()))))
-        
-        vanilla_room_fields: List[str] = [ e.value for e in SANTAH.vanilla_room_enum]
-        for f in default_fs:
-            init_field_content_underlying_tuple_class[f] = 0
-            
-        for c_f in constructed_fields:
-            self.field_type[c_f] = NamedTupleFieldType.OTHER_ARRAY
-            
-        for f in init_field_content_underlying_tuple_class.keys():
-            if f in vanilla_room_fields:
-                init_field_content_vanilla_room[f] = init_field_content_underlying_tuple_class[f]
-        
-        content_dict: Dict[str, Any] = self.field_contents
-        # Start at the proto room level:
-        vanilla_room_constructed_: Dict[str, jArray] = {}
-        # Do it this way, so that from that from the constructors point of view the field construction happens concurrently. 
-        # This forbids interaction between constructed fields at the vanilla room level. 
-        # I may change my mind about this in the future
-        for f in list(SANTAH._vanilla_room_field_constructors.keys()):
-            initted_vanilla_room = SANTAH.vanilla_room(**copy.deepcopy(init_field_content_vanilla_room))
-            content = SANTAH._vanilla_room_field_constructors[f](initted_vanilla_room)
-            vanilla_room_constructed_[f] = content
-        for f in vanilla_room_constructed_.keys():
-            content_dict[f] = vanilla_room_constructed_[f]
-            init_field_content_underlying_tuple_class[f] = vanilla_room_constructed_[f]
-            init_field_content_vanilla_room[f] = vanilla_room_constructed_[f]
-        
-        # Now initialize all the fields that have been decalared as requiring initialization at the TAG level.
-        constructed_tag_fields: Dict[str, jArray] = {}
-        
-        for tag in implemented_tags:
-            if tag in SANTAH.tag_based_room_constructor_fields:
-                tag_field_constructors: Dict[str, Callable[[VanillaRoom, TagNamedTuple], jArray]] = SANTAH.tag_based_room_constructor_fields[tag]
-                for f_ in tag_field_constructors.keys():
-                    
-                    tag_nt: Type[NamedTuple] = SANTAH.my_tag_mapping[tag]
-                    tag_constructor_args: Dict[str, Any] = {}
-                    for f in tag_nt._fields:
-                        tag_constructor_args[f] = init_field_content_underlying_tuple_class[f]
-                    tag_ = tag_nt(**copy.deepcopy(tag_constructor_args))
-                    vanilla_room = SANTAH.vanilla_room(**copy.deepcopy(init_field_content_vanilla_room))
-                    field_content = tag_field_constructors[f_](vanilla_room, tag_)
-                    constructed_tag_fields[f_] = field_content
-        # Now move all the constructed tag fields into the content dict & make them available for initializing fields 
-        # with constructors declared on the underlying tuple class level.
-        for _c in constructed_tag_fields.keys():
-            content_dict[_c] = constructed_tag_fields[_c]
-            init_field_content_underlying_tuple_class[_c] = constructed_tag_fields[_c]
-                    
-            
-        # Now construct the fields declared at the individual room level. This is a legacy feature and should not be used anyomore
-        room_indiv_constructed_fields = list(SANTAH._fields_constructor[self.underlyingTupleClass].keys())
-        for f in room_indiv_constructed_fields:
-            cnt = SANTAH._fields_constructor[self.underlyingTupleClass][f](
-                                self.underlyingTupleClass(**copy.deepcopy(init_field_content_underlying_tuple_class)))
-            content_dict[f] = cnt
-
-        # All fields in the room which need to be padded to roomsize to guarantee spatial consistency
-        per_room_resize_fields: list[str]
-        my_tags: list[Enum] = SANTAH.room_tags[self.underlyingTupleClass]
-        per_room_resize_fields = list(itertools.chain.from_iterable([list(SANTAH.roomsized_tag_fields[e]) for e in my_tags if e in SANTAH.roomsized_tag_fields]))
-        per_room_resize_fields += [e.value for e in SANTAH.roomsized_room_fields]
-        if SANTAH.display_height is None or SANTAH.display_width is None:
-            raise Exception(
-                "ROOM_SIZED_ARRAY fields are present but display_height/display_width were not "
-                "registered. Pass display_height and display_width to SANTAH.register_proto_room.")
-        vertical_offset_val = int(content_dict[RequiredRoomFields.VERTICAL_OFFSET.value][0])
-        for f in content_dict.keys():
-            if f not in per_room_resize_fields:
-                continue
-            print(f)
-            field_arr = content_dict[f]
-            # Build the full-display-size shape: same as field_arr but dim 1 -> display_height
-            full_shape = list(field_arr.shape)
-            full_shape[1] = SANTAH.display_height
-            if full_shape == field_arr.shape:
-                continue
-            padded = jnp.zeros(full_shape, dtype=field_arr.dtype)
-            # start_indices: 0 for every dim except dim 1 which is vertical_offset
-            start_indices = [0] * len(field_arr.shape)
-            start_indices[1] = vertical_offset_val
-            padded = jax.lax.dynamic_update_slice(padded, field_arr, start_indices=tuple(start_indices))
-            content_dict[f] = padded
-
-        def jittable_initialisation(content: Dict[str, Any], tuple_class: NamedTuple):
-            return tuple_class(**content)
-        return jax.jit(partial(jittable_initialisation, content=content_dict, tuple_class=self.underlyingTupleClass))
-    
-    def get_serialisation_function(self, generate_writer: bool = True) -> Tuple[Callable[[NamedTuple], jArray], Callable[[NamedTuple, jArray], NamedTuple], int]:
-        """Generates a function that takes in a NamedTuple representing a room 
-           and returns a serialised array version of the persistant fields in the named tuple, 
-           i.e. the fields that need to be stored to the global store. 
-           Also generates the corresponding deserialisation function which takes in an initialized NamedTuple and 
-           the persistence storage associated with this room and loads the values from the persistence storage into the 
-           named_tuple
-        Returns:
-            Tuple[Callable[[NamedTuple], jArray], int]: Returns a serialisation function and and integer that gives 
-                the size of all persisting fields.
-        """
-        # Split all serializable fields according to their type.
-        # Also collect partial + full serialisation functions 
-        # for all named-tuple fields.
-        size: int = 0
-        singleton_integer_fields: List[str] = []
-        named_tuple_fields: List[str] = []
-        named_tuple_partial_deserialise: List[Callable[[NamedTuple, jArray], jArray]] = []
-        named_tuple_partial_serialisation: List[Callable[[NamedTuple, jArray], jArray]] = []
-        named_tuple_full_serialisation: List[Callable[[NamedTuple], jArray]] = []
-        named_tuple_full_deserialise: List[Callable[[NamedTuple, jArray], jArray]] = []
-        named_tuple_sizes: List[int] = []
-        named_tuple_stack_heights: List[int] = []
-        for f in self.present_fields:
-            if self.field_type[f] in (NamedTupleFieldType.OTHER_ARRAY, NamedTupleFieldType.ROOM_SIZED_ARRAY):
-                continue
-            elif self.field_type[f] == NamedTupleFieldType.INTEGER_SCALAR:
-                if not self.field_persistent[f]:
-                    continue
-                else:
-                    size += 1
-                    singleton_integer_fields.append(f)
-            elif self.field_type[f] == NamedTupleFieldType.NAMED_TUPLE_STACK:
-                named_tuple_fields.append(f)
-                named_tuple_partial_deserialise.append(
-                    SANTAH.partial_deserialisations[self.field_named_tuples[f]])
-                named_tuple_partial_serialisation.append(
-                    SANTAH.partial_serialisations[self.field_named_tuples[f]])
-                named_tuple_full_serialisation.append(
-                    SANTAH.full_serialisations[self.field_named_tuples[f]])
-                named_tuple_full_deserialise.append(
-                    SANTAH.full_deserializations[self.field_named_tuples[f]])
-                named_tuple_stack_heights.append(len(self.field_contents[f]))
-                
-                tup_size: int = SANTAH.partially_serialised_sizes[self.field_named_tuples[f]]
-                named_tuple_sizes.append(tup_size)
-                size += tup_size*len(self.field_contents[f])
-                
-                
-        # The actual function used to write a room to persistence. 
-        # This function essentially picks out all the attributes of the room that 
-        # were declared to be serializable & concatenates them into a long 
-        # array which can be written to global storage.
-        def _write_self_to_persistence(_tuple: NamedTuple, _int_fields: List[str], _named_tup_fields: List[str], 
-                                       _named_tup_deserialisation_function: List[Callable[[jArray], NamedTuple]], 
-                                       _named_tup_partial_serialisation_fun: List[Callable[[NamedTuple], jArray]], 
-                                       _named_tuple_sizes: List[int], 
-                                       _named_tuple_stack_heights: List[int], 
-                                       _full_size: int
-                                       ):
-            full_serialised_array: jArray = jnp.zeros((_full_size, ), dtype=jnp.int32)
-            current_offset = 0
-            for i, d in enumerate(_int_fields):
-                full_serialised_array = full_serialised_array.at[i].set(getattr(_tuple, d)[0])
-                current_offset += 1
-            for d in zip(_named_tup_fields, 
-                         _named_tup_deserialisation_function, 
-                         _named_tup_partial_serialisation_fun, 
-                         _named_tuple_stack_heights, 
-                         _named_tuple_sizes):
-                _field, _deserialise, _serialise_part, _height, _size = d
-                for i in range(_height):
-                    current_arr: jArray = getattr(_tuple, _field)[i, ...]
-                    nt_repr: NamedTuple = _deserialise(current_arr)
-                    persistence_arr: jArray = _serialise_part(nt_repr)
-                    full_serialised_array = full_serialised_array.at[current_offset:current_offset+_size].set(persistence_arr)
-                    current_offset += _size
-            return full_serialised_array
-        
-        
-        # The Persistence load function.
-        # receives a slice of the global storage corresponding to the serialisable fields of this room
-        # & reconstructs the room-named tuple from the serialised fields & default values for all other fields.
-        #
-        #
-        def _load_self_from_persistence(_tuple: NamedTuple, _persistence_storage: jArray, _int_fields: List[str], 
-                                        _named_tup_fields: List[str], 
-                                       _named_tup_serialisation_function: List[Callable[[NamedTuple], jArray]], 
-                                       _named_tup_partial_deserialisation_function: List[Callable[[NamedTuple], jArray]],
-                                       _named_tup_full_deserialisation_function: List[Callable[[jArray], NamedTuple]], 
-                                       _named_tuple_sizes: List[int], 
-                                       _named_tuple_stack_heights: List[int], 
-                                       _all_fields: List[str], 
-                                       _tuple_class: NamedTuple
-                                       ):
-            field_contents: Dict[str, jArray] = {}
-            for f in _all_fields:
-                field_contents[f] = getattr(_tuple, f)
-            
-            current_offset = 0
-            for i, d in enumerate(_int_fields):
-                field_contents[d] = jnp.array([_persistence_storage[i]])
-                current_offset += 1
-            for d in zip(_named_tup_fields, 
-                         _named_tup_serialisation_function, 
-                         _named_tup_partial_deserialisation_function, 
-                         _named_tup_full_deserialisation_function, 
-                         _named_tuple_sizes, 
-                         _named_tuple_stack_heights):
-                _field, _serialise_fully, _deserialize_part, _deserializy_fully, _size, _height = d
-                tuple_stack: jArray = field_contents[_field]
-                for i in range(_height):
-                    tmp = tuple_stack[i, ...]
-                    curr_tup: NamedTuple = _deserializy_fully(tmp)
-                    _arr_persist = _persistence_storage[current_offset: current_offset+_size]
-                    curr_tup = _deserialize_part(curr_tup, _arr_persist)
-                    serialised_tup: jArray = _serialise_fully(curr_tup)
-                    tuple_stack = tuple_stack.at[i, ...].set(serialised_tup)
-                    current_offset += _size
-                field_contents[_field] = tuple_stack
-            ret = _tuple_class(**field_contents)
-            return ret
-        
-        if generate_writer:
-            wrapped_persistence_writer: Callable[[NamedTuple], jArray] = partial(
-                _write_self_to_persistence, 
-                    _int_fields = singleton_integer_fields, _named_tup_fields = named_tuple_fields, 
-                    _named_tup_deserialisation_function = named_tuple_full_deserialise, 
-                    _named_tup_partial_serialisation_fun = named_tuple_partial_serialisation, 
-                    _named_tuple_sizes = named_tuple_sizes, 
-                    _named_tuple_stack_heights = named_tuple_stack_heights, 
-                    _full_size = size
-            )
-            wrapped_persistence_writer = jax.jit(wrapped_persistence_writer)
-        
-        jitted_persistence_loader: Callable[[NamedTuple, jArray], NamedTuple] = partial(
-            _load_self_from_persistence, 
-            _int_fields = singleton_integer_fields,
-            _named_tup_fields = named_tuple_fields, 
-            _named_tup_serialisation_function = named_tuple_full_serialisation, 
-            _named_tup_partial_deserialisation_function = named_tuple_partial_deserialise,
-            _named_tup_full_deserialisation_function = named_tuple_full_deserialise, 
-            _named_tuple_sizes = named_tuple_sizes, 
-            _named_tuple_stack_heights = named_tuple_stack_heights, 
-            _all_fields = self.present_fields, 
-            _tuple_class = self.underlyingTupleClass
-        )
-        jitted_persistence_loader = jax.jit(jitted_persistence_loader)
-        
-        if generate_writer:
-            return wrapped_persistence_writer, jitted_persistence_loader, size
+        # Store content
+        if tag is None:
+            self.base_class_fields[field_name] = content
         else:
-            return jitted_persistence_loader, size
+            if tag not in self.tag_fields:
+                self.tag_fields[tag] = {}
+            self.tag_fields[tag][field_name] = content
         
+    def _build_fields(self) -> None:
+        # Validate required base-room fields.
+        required_base_fields = MontezumaRoomLayoutAuthority.get_required_fields(None)
+        missing_base_fields = [f for f in required_base_fields if f not in self.base_class_fields]
+        if len(missing_base_fields) > 0:
+            raise Exception(
+                f"Room with ID {self.room_id} is missing required base-room fields: {missing_base_fields}"
+            )
+
+        # Check that all tags that have fields are actually present.
+        needed_tags = set(self.tags)
+        # Tags without required fields (e.g. only constructed fields) can be represented by an empty dict.
+        flag_tags = [t for t in self.tags if len(MontezumaRoomLayoutAuthority.get_required_fields(t)) == 0]
+        for t in flag_tags:
+            if t not in self.tag_fields:
+                self.tag_fields[t] = {}
+
+        # Validate that all required fields for present tags have been set.
+        for t in self.tags:
+            required_tag_fields = MontezumaRoomLayoutAuthority.get_required_fields(t)
+            if t not in self.tag_fields:
+                continue
+            missing_tag_fields = [f for f in required_tag_fields if f not in self.tag_fields[t]]
+            if len(missing_tag_fields) > 0:
+                raise Exception(
+                    f"Room with ID {self.room_id} is missing required fields for tag {t.__name__}: {missing_tag_fields}"
+                )
+
+        present_tags = set(list(self.tag_fields.keys()))
+        if len(present_tags.intersection(needed_tags)) != len(needed_tags):
+            superf_tags = list(present_tags.difference(needed_tags))
+            if len(superf_tags) > 0:
+                raise Exception(f"Room with ID {self.room_id} has tags it is not supposed to have: {superf_tags}")
+            missing_tags = list(needed_tags.difference(present_tags))
+            if len(missing_tags) > 0:
+                raise Exception(f"Room with ID {self.room_id} is missing declared room tags: {missing_tags}")
+
+        # Construct fields concurrently: build instances with all fields present (unconstructed + empty arrays for constructed),
+        # then call all constructors in a single pass so no constructed fields are visible yet.
+        
+        # Build base room instance with empty arrays for its constructed fields
+        base_room_fields = dict(self.base_class_fields)
+        base_room_constructors = MontezumaRoomLayoutAuthority.get_base_constructors()
+        for field_name in base_room_constructors:
+            base_room_fields[field_name] = jnp.array([])
+        base_room_instance = self.base_class(**base_room_fields)
+        
+        # Build tag instances with empty arrays for their constructed fields
+        tag_instances: Dict[type[NamedTuple], NamedTuple] = {}
+        for t in self.tags:
+            tag_fields = dict(self.tag_fields[t]) if t in self.tag_fields else {}
+            tag_constructors = MontezumaRoomLayoutAuthority.get_tag_constructors(t)
+            for field_name in tag_constructors:
+                tag_fields[field_name] = jnp.array([])
+            tag_instances[t] = t(**tag_fields)
+        
+        # Call all base room constructors and store results
+        for field_name, constructor in base_room_constructors.items():
+            # For base room constructors, pass the first available tag instance if any tags exist
+            tag_param = None
+            content = constructor(base_room_instance, tag_param)
+            if not MontezumaRoomLayoutAuthority.validate_field_contents(tag=None, field=field_name, 
+                                                                    content=content):
+                raise Exception(f"Constructor for field {field_name} of base-room returned value of invalid type.")
+            self.base_class_fields[field_name] = content
+        
+        # Call all tag constructors and store results
+        for t in self.tags:
+            tag_constructors = MontezumaRoomLayoutAuthority.get_tag_constructors(t)
+            for field_name, constructor in tag_constructors.items():
+                content = constructor(base_room_instance, tag_instances[t])
+                if not MontezumaRoomLayoutAuthority.validate_field_contents(tag=t, field=field_name, 
+                                                                            content=content):
+                    raise Exception(f"Constructor for field {field_name} in room-tag {t.__name__} returned value of invalid type.")
+                self.tag_fields[t][field_name] = content
+        
+            
     def connect_to(self, my_location: RoomConnectionDirections, other_room: Room, other_location: RoomConnectionDirections):
         # 
         # Generate the graph structure which describes the room layout.
@@ -446,20 +161,57 @@ class NewPyramidLayout:
     def __init__(self):
         self.running_counter: int = 0
         self.rooms: Dict[int, Room] = {}
-        self.persistence_writer: Callable[[NamedTuple, jArray], jArray] = None
-        self.persistence_loader: Callable[[NamedTuple, jArray], NamedTuple] = None
-        self.raise_proto_room_to_specific: Dict[int, Callable[[NamedTuple, NamedTuple], NamedTuple]]= {}
-        self.lower_specific_room_to_proto_room: Dict[int, Callable[[NamedTuple], NamedTuple]] = {}       
-        self.initial_persistence_storage: jArray
         
-        # This is ~~ mostly ~~ just used for stashing writers and loaders so that 
-        # we don't have to recompute them when we generate wrapper functions that handle room-specific functionality
-        self.room_persistence_writers: Dict[int, Callable[[NamedTuple], jArray]] = {}
-        self.room_persistence_loaders: Dict[int, Callable[[NamedTuple, jArray], NamedTuple]] = {}
-        self.static_jitted_raising_function: Callable[[NamedTuple, jArray, int], NamedTuple] = None
-        self.single_room_proto_loader: Dict[int, Callable[[jArray, jArray], NamedTuple]] = {}
-        self.single_room_proto_writer: Dict[int, Callable[[jArray, NamedTuple, jArray], jArray]] = {}
+    def create_new_room(self, tags: Tuple[Type[Enum]] = ()):
+        """The main function used to construct new rooms. 
+            Automatically generates all persistence infrastructure required by the framework.
+
+        Args:
+            tags (Tuple[Type[Enum]], optional): Tags representing the functionality 
+                which this room should be implemented. A room can implement arbitrary many tags, 
+                all infrastructure that is required to support this is generated automatically on game-startup.. Defaults to ().
+
+        """
+        if not isinstance(tags, Tuple):
+            raise Exception("Tags need to be specified as a tuple.")
+        if MontezumaRoomLayoutAuthority._room_named_tuple is None:
+            raise Exception(f"No base room named tuple registered.")
+        if not MontezumaRoomLayoutAuthority.check_tag_overlap(tags):
+            raise Exception(f"The given set of tags overlaps.")
+        new_room = NewRoom(room_id=self.running_counter, base_class=MontezumaRoomLayoutAuthority._room_named_tuple, 
+                           tags=tags)
+        self.running_counter += 1
+        self.rooms[new_room.room_id] = new_room
+        # Generate lowering & raising functions necessary for the function wrappers.
+        return new_room
     
+class RoomPersistenceStorage():
+    # In all, room dimension is along the first dimension
+    # Contents for all static fields in the base room. Key is field name, contains stacked contents (along the first axis) of all static fields.
+    base_room_static_fields: dict[str, jArray] = {}
+    # Same for the dynamic fields in the base room.
+    base_room_dynamic_fields: dict[str, jArray] = {}
+    # Content for tag fields are exactly the same, but outer level is another dictionary 
+    # mapping tag_name to the field dict.
+    tag_static_fields: dict[str, dict[str, jArray]] = {}
+    tag_dynamic_fields: dict[str, dict[str, jArray]] = {}
+    # Maps name of the base room field to the slice size occupied by the per-room contents along the first 
+    # axis. As jax requires input shapes to stay static, if the field contains a stack of something 
+    # (right now only named tuples), the stack size gets padded for each room/ named tuple to the biggest 
+    # occuring stack-size among rooms/ tags of that type. 
+    base_room_field_slice_size: dict[str, int] = {}
+    # Same as above, but top level dict maps tag_name.
+    tag_field_slice_size: dict[str, dict[str, int]] = {}
+    # Maps field -> (room_id -> offset). Offset at which the field-contents for the given room can be found
+    room_field_id_offset: dict[str, dict[int, int]] = {}
+    # Maps tag_name -> (field -> (room_id -> offset)), otherwise same as above.
+    tag_field_room_id_offset: dict[str, dict[str, dict[int, int]]] = {}
+    # Included padding along the first axis for the field contents of each room. 
+    # This only really matters for named_tuple_stack_fields, all other fields have static shape for all rooms anyway. 
+    # Maps (field_name -> (room_id -> padding)) (padding is 0 if it's not a named-tuple field)
+    base_room_ntstack_padding: dict[str, dict[int, int]] = {}
+    # Same as above but maps tag_name -> (field_name -> (room_id -> padding))
+    tag_field_ntstack_padding: dict[str, dict[str, dict[int, int]]] = {}
 
 class MontezumaRoomLayoutAuthority():
     # List of all enrolled named tuples.
@@ -467,7 +219,7 @@ class MontezumaRoomLayoutAuthority():
     # All named tuples that have been enrolled as Tag
     _enrolled_room_tags: list[type[NamedTuple]] = []
     # The one named tuple that has been enrolled as the Room.
-    _room_named_tuple: Optional[NamedTuple] = None
+    _room_named_tuple: Optional[type[NamedTuple]] = None
     
     # This is used during the actual Training. Maps typename of named tuple 
     # To specifications of annotations.
@@ -479,12 +231,101 @@ class MontezumaRoomLayoutAuthority():
     
     # Infrastructure inherited from SANTAH
    
-    tag_based_room_constructor_fields: Dict[type[NamedTuple], Dict[str, Callable[[VanillaRoom, TagNamedTuple], jArray]]] = None
+    tag_constructor_fields: Dict[type[NamedTuple], Dict[str, Callable[[VanillaRoom, TagNamedTuple], jArray]]] = {}
+    base_room_constructed_fields: Dict[str, Callable[[VanillaRoom, TagNamedTuple], jArray]] = None
     #
     # TODO: most of this shit should really only be called once during level creation. Actual gameplay infra should be able 
     # to be run from
     #
     #
+    
+    @classmethod
+    def register_constructors(cls, constructors: Dict[str, Callable[[VanillaRoom, TagNamedTuple], jArray]], tag: type[NamedTuple]|None = None) -> None:
+        if tag is None:
+            if cls._room_named_tuple is None:
+                raise Exception("Cannot set constructed fields for base room without registering Base Room class first.")
+            if cls.base_room_constructed_fields is not None:
+                raise Exception("Constructed fields for base room type was already set.")
+            avail_base_fields: list[str] = cls._fields_for_nt(cls._room_named_tuple)
+            for field, constr in constructors.items():
+                if field not in avail_base_fields:
+                    raise Exception(f"Attempted to register constructor for non-existent field {field} of Base Room Class")
+
+            cls.base_room_constructed_fields = constructors
+            return None
+        
+        if tag not in cls._enrolled_room_tags:
+            raise Exception(f"Attempted to register constructors for Named Tuple Class {tag.__name__} - needs to be registered as room tag.")
+        
+        if tag in cls.tag_constructor_fields:
+            raise Exception(f" Constructors for room tag {tag.__name__} were already registered.")
+        avail_tag_fields: list[str] = cls._fields_for_nt(tag)
+        for field, constr in constructors.items():
+            if field not in avail_tag_fields:
+                raise Exception(f"Attempted to register constructor for field l{field} of room-tag {tag.__name__} - field does not exist")
+        cls.tag_constructor_fields[tag] = constructors
+        
+    @classmethod
+    def check_tag_overlap(cls, tags: Tuple[type[NamedTuple]]) -> bool:
+        """
+        Checks whether fields of the given set of tags overlap.
+        """
+        seen_fields: set[str] = set()
+        for tag in tags:
+            tag_fields = set(cls._fields_for_nt(tag))
+            if len(seen_fields.intersection(tag_fields)) > 0:
+                return False
+            seen_fields.update(tag_fields)
+        return True
+        
+    @classmethod
+    def get_required_fields(self, tag: type[NamedTuple]|None) -> list[str]:
+        """Returns the list of explicitly required fields for the given room tag or the 
+            base room-type.
+
+        Args:
+            tag (type[NamedTuple] | None): _description_
+
+        Returns:
+            list[str]: _description_
+        """
+        if tag is None:
+            if self._room_named_tuple is None:
+                raise Exception("No room named tuple has been registered yet.")
+            base_fields: list[str] = self._fields_for_nt(self._room_named_tuple)
+            if self.base_room_constructed_fields is None:
+                return base_fields
+            constructed_fields = set(self.base_room_constructed_fields.keys())
+            return [field for field in base_fields if field not in constructed_fields]
+
+        if tag not in self._enrolled_room_tags:
+            raise Exception(f"Attempted to retrieve required fields for non-registered room tag {tag.__name__}")
+
+        tag_fields: list[str] = self._fields_for_nt(tag)
+        if tag not in self.tag_constructor_fields:
+            return tag_fields
+
+        constructed_fields = set(self.tag_constructor_fields[tag].keys())
+        return [field for field in tag_fields if field not in constructed_fields]
+
+    
+    @classmethod
+    def get_base_constructors(cls) -> Dict[str, Callable[[VanillaRoom, TagNamedTuple], jArray]]:
+        if cls.base_room_constructed_fields is None:
+            warnings.warn(f"No constructed fields registered for base-room class {cls._room_named_tuple.__name__}.")
+            return {}
+        return cls.base_room_constructed_fields
+    
+    @classmethod
+    def get_tag_constructors(cls, tag: type[NamedTuple]) -> Dict[str, Callable[[VanillaRoom, TagNamedTuple], jArray]]:
+        if not tag in cls.tag_constructor_fields:
+            warnings.warn(f"Attempted to retreive constructors for room tag {tag.__name__} - no constructors found.")
+            return {}
+        return cls.tag_constructor_fields[tag]
+    
+    @classmethod
+    def is_room_tag(cls, nt_type: type[NamedTuple]) -> bool:
+        return nt_type in cls._enrolled_room_tags
     
     @classmethod
     def register_constructed_fields(cls, constructed_fields: Dict[type[NamedTuple], Dict[str, Callable[[VanillaRoom, TagNamedTuple], jArray]]] = {}):
@@ -524,7 +365,7 @@ class MontezumaRoomLayoutAuthority():
             tag_nt: Type[NamedTuple] = k
             if not set(constructed_fields[k].keys()).issubset(set(tag_nt._fields)):
                 raise Exception(f"For Room-Tag {tag_nt.__name__}: User attempted to register a constructed field which is not part of the tag.")
-        cls.tag_based_room_constructor_fields = constructed_fields
+        cls.tag_constructor_fields = constructed_fields
         
                 
     
@@ -532,37 +373,75 @@ class MontezumaRoomLayoutAuthority():
     
     
     @classmethod
-    def valide_field_contens(cls, tag: Optional[type[NamedTuple]], field: str, content: jnp.ndarray|list[NamedTuple]) -> bool:
-        """Validates the prospective contents of a named-tuple field.
+    def validate_field_contents(cls, tag: Optional[type[NamedTuple]], field: str, content: jnp.ndarray|list[NamedTuple]) -> bool:
+        """Validates the prospective contents of a named-tuple field against the annotations given in the corresponding NamedTuple.
 
         Args:
-            tag (Optional[type[NamedTuple]]): _description_
-            field (str): _description_
-            content (jnp.ndarray | list[NamedTuple]): _description_
-
-        Raises:
-            Exception: _description_
-            Exception: _description_
-            Exception: _description_
-            Exception: _description_
-            Exception: _description_
-            Exception: _description_
-            Exception: _description_
-            Exception: _description_
-            Exception: _description_
-            Exception: _description_
-            Exception: _description_
-            Exception: _description_
-            Exception: _description_
-            Exception: _description_
-            Exception: _description_
-            Exception: _description_
-            Exception: _description_
-            Exception: _description_
+            tag (Optional[type[NamedTuple]]): RoomTag which the field belongs to. If no tag is given, 
+                field belongs to the underlying basic room class.
+            field (str): Name of the field.
+            content (jnp.ndarray | list[NamedTuple]): Contents of the field. Either a numpy array or if the field contains 
+                a NamedTupleStack a list of named tuples of the same (already registered) type
 
         Returns:
             bool: _description_
         """
+        target_tup = tag if tag is not None else cls._room_named_tuple
+        if target_tup is None:
+            raise Exception("No room named tuple has been registered yet.")
+        
+        if target_tup not in cls._type_to_annos:
+            raise Exception(f"NamedTuple {target_tup.__name__} has not been registered.")
+        
+        annos = cls._type_to_annos[target_tup]
+        if field not in annos:
+            raise Exception(f"Field {field} is not present in NamedTuple {target_tup.__name__}")
+        
+        field_annos = annos[field]
+        
+        # Check if it's a NamedTupleStack
+        if NAMED_TUPLE_STACK in field_annos:
+            if not isinstance(content, list):
+                return False
+            stack_type = cls._get_anno_tuple_stack_type(field_annos)
+            if stack_type is None:
+                return False
+            if stack_type not in cls._enrolled_named_tuple:
+                raise Exception(f"Cannot accept non-registered tuple-type {stack_type.__name__} as type for field {field}")
+            if stack_type in cls._enrolled_room_tags or stack_type == cls._room_named_tuple:
+                raise Exception(f"Cannot accept named-tuple type {stack_type.__name__} as type for field {field}; Only types not registered as RoomTag or Room base-class are allowed.")
+            for item in content:
+                if not isinstance(item, stack_type):
+                    return False
+                # Recursively validate fields of the named tuple in the stack
+                for sub_field in stack_type._fields:
+                    sub_content = getattr(item, sub_field)
+                    if not cls.validate_field_contents(stack_type, sub_field, sub_content):
+                        return False
+                
+            return True
+        
+        # Check if it's a SINGLETON_INT
+        if SINGLETON_INT in field_annos:
+            if not isinstance(content, (jnp.ndarray, jArray)):
+                return False
+            if content.dtype != jnp.int32:
+                return False
+            if content.shape != (1,):
+                return False
+            return True
+            
+        # Check if it's ROOM_SHAPED or CONSTANT_SHAPE
+        if ROOM_SHAPED in field_annos or CONSTANT_SHAPE in field_annos:
+            if not isinstance(content, (jnp.ndarray, jArray)):
+                return False
+            if content.dtype != jnp.int32:
+                return False
+            
+            # These are usually arrays, further validation might depend on specific requirements
+            return True
+
+        return True
     
     
     @classmethod
@@ -577,7 +456,8 @@ class MontezumaRoomLayoutAuthority():
             and isinstance(getattr(nt_class, "_fields"), tuple)
         )
     
-    def _fetch_custom_annotations_per_field(tup: type[NamedTuple]) -> dict[str, list[object]]:
+    @classmethod
+    def _fetch_custom_annotations_per_field(cls, tup: type[NamedTuple]) -> dict[str, list[object]]:
         ret_annos: dict[str, list[object]] = {}
         hints = get_type_hints(tup, include_extras=True)
         tup_name: str = tup.__name__
@@ -590,6 +470,12 @@ class MontezumaRoomLayoutAuthority():
             base_type, custom_annos = get_args(f_hint)
             ret_annos[field] = list(custom_annos)
         return ret_annos
+    
+    @classmethod
+    def _fields_for_nt(cls, tup: type[NamedTuple]) -> list[str]:
+        hints = get_type_hints(tup, include_extras=True)
+        fields: list[str] = list(hints.keys())
+        return fields
     
     @classmethod
     def get_annotations(cls, tup: type[NamedTuple], field: str) -> list[object]:
@@ -674,7 +560,18 @@ class MontezumaRoomLayoutAuthority():
             return False
         if stack_type in cls._enrolled_room_tags or stack_type == cls._room_named_tuple:
             return False
+        if stack_type not in cls._type_to_annos:
+            return False
+
         annos: dict[str, list[object]] = cls._type_to_annos[stack_type]
+        for field_annos in annos.values():
+            if SINGLETON_INT not in field_annos:
+                return False
+            if NAMED_TUPLE_STACK in field_annos:
+                return False
+            if ROOM_SHAPED in field_annos or CONSTANT_SHAPE in field_annos:
+                return False
+        return True
         
     
     @classmethod
@@ -683,11 +580,242 @@ class MontezumaRoomLayoutAuthority():
         Named Tuple classes that are registered as the Content of a NamedTupleStack may only contain scalar fields (static and dynamic).
         Also, they may not be registred as either room or tag themselves.
         """
-        
-        
-        
+        for tup, field_annos in self._type_to_annos.items():
+            for field, annos in field_annos.items():
+                stack_type = self._get_anno_tuple_stack_type(annos)
+                if stack_type is None:
+                    continue
+                if not self._check_eligible_named_tuple_stack_type(stack_type):
+                    raise Exception(
+                        f"NamedTuple {tup.__name__}, field {field}:: stack element type {stack_type.__name__} must be a registered non-room, non-tag NamedTuple containing only SINGLETON_INT fields."
+                    )
+
+    
+
     @classmethod
-    def build_layout(cls, layout: PyramidLayout, storage_prefix: str = "mzuma_layout") -> None:
-        for room in layout.rooms.values():
-            if not type(room) in cls._room
+    def _serialise_named_tuple_in_stack(cls, tup_instance: NamedTuple) -> tuple[jArray, jArray]:
+        tup_type = type(tup_instance)
+        # Might as well do one last check for safety, although should have happened already...
+        if not cls._check_eligible_named_tuple_stack_type(stack_type=type(tup_instance)):
+            raise Exception(f"Received tuple of invalid stack-type {type(tup_instance).__name__}")
+        static_fields: list[str] = []
+        dynamic_fields: list[str] = []
+        for field in sorted(list(cls._fields_for_nt(tup_type))):
+            annos = cls.get_annotations(tup_type, field)
+            if STATIC in annos:
+                static_fields.append(field)
+            elif DYNAMIC in annos:
+                dynamic_fields.append(field)
+
+        serialised_static: jArray = jnp.zeros((len(static_fields),), jnp.int32)
+        serialised_dynamic: jArray = jnp.zeros((len(dynamic_fields),), jnp.int32)
+
+        for idx, field in enumerate(static_fields):
+            field_content = getattr(tup_instance, field)
+            serialised_static = serialised_static.at[idx].set(field_content[0])
+        for idx, field in enumerate(dynamic_fields):
+            field_content = getattr(tup_instance, field)
+            serialised_dynamic = serialised_dynamic.at[idx].set(field_content[0])
+        return serialised_static, serialised_dynamic
+
+    @classmethod
+    def _serialise_field_content_for_storage(cls, tup: type[NamedTuple], field: str, content: jnp.ndarray|List[NamedTuple]) -> jArray:
+        annos = cls.get_annotations(tup, field)
+        if NAMED_TUPLE_STACK in annos:
+            stack_type = cls._get_anno_tuple_stack_type(annos)
+            if stack_type is None:
+                raise Exception(f"Field {field} of {tup.__name__} is marked as NAMED_TUPLE_STACK but has no stack type annotation.")
+            serialised_size = cls._serialised_named_tuple_size(stack_type)
+            serialised_content = jnp.zeros((len(content), serialised_size), dtype=jnp.int32)
+            for idx, item in enumerate(content):
+                if not isinstance(item, stack_type):
+                    raise Exception(
+                        f"Field {field} of {tup.__name__} contains item of type {type(item).__name__}; expected {stack_type.__name__}."
+                    )
+                serialised_static, serialised_dynamic = cls._serialise_named_tuple_in_stack(item)
+                serialised_item = jnp.concatenate([serialised_static, serialised_dynamic], axis=0)
+                serialised_content = serialised_content.at[idx, ...].set(serialised_item)
+            return serialised_content
+
+        if not isinstance(content, (jnp.ndarray, jArray)):
+            raise Exception(f"Field {field} of {tup.__name__} must be a jax array after room construction.")
+
+        if ROOM_SHAPED in annos:
+            # TODO: Pad ROOM_SHAPED fields to the canonical room size along the first two axes before stacking.
+            pass
+
+        return content
+    
+    def _serialize_nt_stack(self, contents: list[NamedTuple]) -> Tuple[jArray, jArray]:
+        # TODO: This is shit
+        if len(contents) == 0:
+            return Exception("Received empty NamedTuple stack, this should not happen.")
+
+        nt_type = type(contents[0])
+        
+        static_fields: list[str] = []
+        dynamic_fields: list[str] = []
+        for field in sorted(MontezumaRoomLayoutAuthority._fields_for_nt(nt_type)):
+            annos = MontezumaRoomLayoutAuthority.get_annotations(nt_type, field)
+            if STATIC in annos:
+                static_fields.append(field)
+            elif DYNAMIC in annos:
+                dynamic_fields.append(field)
+        static_fields = sorted(static_fields)
+        dynamic_fields = sorted(dynamic_fields)
+        static_stack: jnp.ndarray = None
+        dynamic_stack: jnp.ndarray = None
+        if len(static_fields) > 0:
+            static_stack = jnp.zeros((len(contents), len(static_fields)), dtype=jnp.int32)
+        if len(dynamic_fields) > 0:
+            dynamic_fields = jnp.zeros((len(contents), len(dynamic_fields)), dtype=jnp.int32)
+
+        for row_idx, stack_item in enumerate(contents):
+            for col_idx, field in enumerate(static_fields):
+                value = getattr(stack_item, field)
+                static_stack = static_stack.at[row_idx, col_idx].set(value[0])
+
+            for col_idx, field in enumerate(dynamic_fields):
+                value = getattr(stack_item, field)
+                dynamic_stack = dynamic_stack.at[row_idx, col_idx].set(value[0])
+
+        return static_stack, dynamic_stack
+
+    @classmethod
+    def _stack_storage_field_contents(
+        cls,
+        tup: type[NamedTuple],
+        field: str,
+        room_contents: List[Tuple[int, jnp.ndarray|List[NamedTuple]]],
+    ) -> Tuple[jArray|Tuple[jArray, jArray], int, Dict[int, int], Dict[int, int]]:
+        """Generates storage data for a single field of a room-tag/
+
+        Args:
+            tup (type[NamedTuple]): Type of the named tuple the field belongs to.
+            field (str): Name of the field.
+            room_contents (List[Tuple[int, jnp.ndarray | List[NamedTuple]]]): List containing pairs of RoomID and the corresponding field-contents. 
+                Works under the assumption that a room can only ever have one instance of any given tag. This seems reasonable...
+
+        Returns:
+            Tuple[jArray|Tuple[jArray, jArray], Dict[int, int], Dict[int, int]]: 
+                                Stacked array containing contents of this field for all rooms. If given content is a NamedTupleStack,
+                                    a tuple of arrays (static_stack, dynamic_stack) is returned. 
+                                    If a NamedTuple type has either no static or no dynamic fields, one of the arrays is liable to be None, 
+                                Dictionary mapping room id to offset in the stack (key for a room is only contained if the room actually has this tag...)
+                                Dictionary mapping room id to padding applied along the first dimension. This is 0 if the field does not contain a NamedTupleStack
+
+        """
+        annos = cls.get_annotations(tup, field)
+        
+        
+        room_offsets: Dict[int, int] = {}
+        room_padding: Dict[int, int] = {}
+        current_offset = 0
+
+        if NAMED_TUPLE_STACK in annos:
+            static_contents: list[jArray] = []
+            dynamic_contents: list[jArray] = []
+            max_slice_size = max((content.shape[0] for _, content in serialised_contents), default=0)
+            padded_contents: List[jArray] = []
+            stack_type = cls._get_anno_tuple_stack_type(annos)
+            trailing_size = 0 if stack_type is None else cls._serialised_named_tuple_size(stack_type)
+
+            for room_id, content in serialised_contents:
+                padding = max_slice_size - content.shape[0]
+                room_offsets[room_id] = current_offset
+                room_padding[room_id] = padding
+                current_offset += max_slice_size
+                if padding > 0:
+                    content = jnp.pad(content, ((0, padding), (0, 0)))
+                padded_contents.append(content)
+
+            if len(padded_contents) == 0:
+                stacked_content = jnp.zeros((0, trailing_size), dtype=jnp.int32)
+            else:
+                stacked_content = jnp.concatenate(padded_contents, axis=0)
+            return stacked_content, max_slice_size, room_offsets, room_padding
+
+        stacked_parts: List[jArray] = []
+        for room_id, content in serialised_contents:
+            slice_size = content.shape[0]
+            room_offsets[room_id] = current_offset
+            room_padding[room_id] = 0
+            current_offset += slice_size
+            stacked_parts.append(content)
+
+        if len(stacked_parts) == 0:
+            stacked_content = jnp.zeros((0,), dtype=jnp.int32)
+            return stacked_content, 0, room_offsets, room_padding
+
+        stacked_content = jnp.concatenate(stacked_parts, axis=0)
+        return stacked_content, room_offsets, room_padding
+
+    @classmethod
+    def build_layout(cls, layout: NewPyramidLayout) -> RoomPersistenceStorage:
+        if cls._room_named_tuple is None:
+            raise Exception("Cannot build layout storage without a registered base room NamedTuple.")
+
+        storage = RoomPersistenceStorage()
+        storage.base_room_static_fields = {}
+        storage.base_room_dynamic_fields = {}
+        storage.tag_static_fields = {}
+        storage.tag_dynamic_fields = {}
+        storage.base_room_field_slice_size = {}
+        storage.tag_field_slice_size = {}
+        storage.room_field_id_offset = {}
+        storage.tag_field_room_id_offset = {}
+        storage.base_room_ntstack_padding = {}
+        storage.tag_field_ntstack_padding = {}
+
+        rooms: List[NewRoom] = [layout.rooms[room_id] for room_id in sorted(layout.rooms.keys())]
+        for room in rooms:
+            room._build_fields()
+
+        base_fields = cls._fields_for_nt(cls._room_named_tuple)
+        for field in base_fields:
+            room_contents = [(room.room_id, room.base_class_fields[field]) for room in rooms]
+            stacked_content, slice_size, room_offsets, room_padding = cls._stack_storage_field_contents(
+                cls._room_named_tuple,
+                field,
+                room_contents,
+            )
+            annos = cls.get_annotations(cls._room_named_tuple, field)
+            if STATIC in annos:
+                storage.base_room_static_fields[field] = stacked_content
+            else:
+                storage.base_room_dynamic_fields[field] = stacked_content
+            storage.base_room_field_slice_size[field] = slice_size
+            storage.room_field_id_offset[field] = room_offsets
+            storage.base_room_ntstack_padding[field] = room_padding
+
+        present_tags = sorted({tag for room in rooms for tag in room.tags}, key=lambda tag: tag.__name__)
+        for tag in present_tags:
+            tag_name = tag.__name__
+            storage.tag_static_fields[tag_name] = {}
+            storage.tag_dynamic_fields[tag_name] = {}
+            storage.tag_field_slice_size[tag_name] = {}
+            storage.tag_field_room_id_offset[tag_name] = {}
+            storage.tag_field_ntstack_padding[tag_name] = {}
+
+            for field in cls._fields_for_nt(tag):
+                room_contents = [
+                    (room.room_id, room.tag_fields[tag][field])
+                    for room in rooms
+                    if tag in room.tags
+                ]
+                stacked_content, slice_size, room_offsets, room_padding = cls._stack_storage_field_contents(
+                    tag,
+                    field,
+                    room_contents,
+                )
+                annos = cls.get_annotations(tag, field)
+                if STATIC in annos:
+                    storage.tag_static_fields[tag_name][field] = stacked_content
+                else:
+                    storage.tag_dynamic_fields[tag_name][field] = stacked_content
+                storage.tag_field_slice_size[tag_name][field] = slice_size
+                storage.tag_field_room_id_offset[tag_name][field] = room_offsets
+                storage.tag_field_ntstack_padding[tag_name][field] = room_padding
+
+        return storage
         
